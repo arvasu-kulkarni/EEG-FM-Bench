@@ -73,7 +73,7 @@ class WorkloadConfig(EEGConfig):
     valid_ratio: float = 0.14
     test_ratio: float = 0.14
     wnd_div_sec: int = 10
-    suffix_path: str = 'Workload EEGMAT'
+    suffix_path: str = 'Workload'
     scan_sub_dir: str = "data"
 
     category: list[str] = field(default_factory=lambda: ['background', 'arithmetic'])

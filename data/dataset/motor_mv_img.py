@@ -64,8 +64,9 @@ class MotorMoveImagineConfig(EEGConfig):
     valid_ratio: float = 0.055
     test_ratio: float = 0.055
     wnd_div_sec: int = 12
-    suffix_path: str = os.path.join('Motor Movement Imagery', 'eeg-motor-movementimagery-dataset-1.0.0')
-    scan_sub_dir: str = "files"
+    # Absolute path to raw EEGMMIDB data
+    suffix_path: str = "/share/data/raw/eegmidb"
+    scan_sub_dir: str = ""
 
     category: list[str] = field(default_factory=lambda: [
         'left', 'right', 'both_fist', 'foot'

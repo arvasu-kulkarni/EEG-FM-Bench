@@ -57,7 +57,7 @@ class BCIC2AConfig(EEGConfig):
     valid_ratio: float = 0.10
     test_ratio: float = 0.10
     wnd_div_sec: int = 4
-    suffix_path: str = os.path.join('BCI Competition IV', '2a')
+    suffix_path: str = os.path.join('bci-iv-2a', '')
     scan_sub_dir: str = "set"
 
     category: list[str] = field(default_factory=lambda: [

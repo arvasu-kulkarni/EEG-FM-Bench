@@ -64,8 +64,8 @@ class SienaScalpConfig(EEGConfig):
     valid_ratio: float = 0.15
     test_ratio: float = 0.15
     wnd_div_sec: int = 10
-    suffix_path: str = "Siena Scalp EEG Dataset"
-    scan_sub_dir: str = "siena-scalp-eeg-database-1.0.0"
+    suffix_path: str = "/share/data/raw/siena/files/siena-scalp-eeg/1.0.0/"
+    scan_sub_dir: str = ""
 
     category: list[str] = field(default_factory=lambda: ['seizure', 'normal'])
 
