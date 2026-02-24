@@ -21,6 +21,7 @@ from baseline.biot.biot_config import BiotConfig
 from baseline.biot.biot_trainer import BiotTrainer
 from baseline.mantis import MantisConfig, MantisDataLoaderFactory, MantisTrainer
 from baseline.moment import MomentConfig, MomentDataLoaderFactory, MomentTrainer
+from baseline.manas import ManasConfig, ManasDataLoaderFactory, ManasTrainer
 from baseline.reve.reve_adapter import ReveDataLoaderFactory
 from baseline.reve.reve_config import ReveConfig
 from baseline.reve.reve_trainer import ReveTrainer
@@ -100,4 +101,11 @@ ModelRegistry.register_model(
     config_class=MomentConfig,
     adapter_class=MomentDataLoaderFactory,
     trainer_class=MomentTrainer
+)
+
+ModelRegistry.register_model(
+    model_type='manas',
+    config_class=ManasConfig,
+    adapter_class=ManasDataLoaderFactory,
+    trainer_class=ManasTrainer
 )

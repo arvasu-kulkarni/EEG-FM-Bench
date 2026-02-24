@@ -10,9 +10,9 @@ RUN_ROOT = os.getenv('EEGFM_RUN_ROOT', os.path.join(ASSETS_ROOT, 'run'))
 LOG_ROOT = os.getenv('EEGFM_LOG_ROOT', os.path.join(RUN_ROOT, 'log'))
 CONF_ROOT = os.getenv('EEGFM_CONF_ROOT', os.path.join(ASSETS_ROOT, 'conf'))
 
-DATABASE_RAW_ROOT = os.getenv('EEGFM_DATABASE_RAW_ROOT', os.path.join(ASSETS_ROOT, 'data', 'raw'))
-DATABASE_PROC_ROOT = os.getenv('EEGFM_DATABASE_PROC_ROOT', os.path.join(ASSETS_ROOT, 'data', 'processed'))
-DATABASE_CACHE_ROOT = os.getenv('EEGFM_DATABASE_CACHE_ROOT', os.path.join(ASSETS_ROOT, 'data', 'cache'))
+DATABASE_RAW_ROOT = '/share/data/eegfmbench/raw/'
+DATABASE_PROC_ROOT = '/share/data/eegfmbench/proc/'
+DATABASE_CACHE_ROOT = '/share/data/eegfmbench/cache'
 
 
 def get_conf_file_path(path):
