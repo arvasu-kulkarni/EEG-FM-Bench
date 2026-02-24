@@ -112,6 +112,7 @@ logging:
     - "mlp-head"
     - "verified"
     - "MODEL_LARGE_DATAD1_LOSSR1_AUGA0.pt"
+    - "eval best"
 
   # Logging intervals
   log_step_interval: 1
