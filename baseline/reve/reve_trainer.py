@@ -423,12 +423,14 @@ class ReveTrainer(AbstractTrainer):
 
     def eval_epoch(self, dataloaders: list[DataLoader], prefix: str):
         """Override to return average loss for scheduler."""
-        # Call parent eval_epoch (which doesn't return anything)
+        # Call parent eval_epoch and keep return for shared trainer logic.
         overall_metrics = super().eval_epoch(dataloaders, prefix)
 
         if prefix == 'eval':
             avg_val_loss = self._compute_eval_loss(overall_metrics)
             self.on_eval_epoch_end(avg_val_loss)
+
+        return overall_metrics
 
     def pretrain_step_for_analysis(
         self,
@@ -571,6 +573,5 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
 

@@ -165,6 +165,8 @@ class AbstractTrainer(ABC):
             repetition_results: Dict[str, List[Dict[str, Any]]],
             ds_name: str,
             seed: int,
+            eval_metrics: Optional[Dict[str, float]] = None,
+            test_metrics: Optional[Dict[str, float]] = None,
     ):
         if not get_is_master():
             return
@@ -172,9 +174,26 @@ class AbstractTrainer(ABC):
         repetition_results.setdefault(ds_name, []).append({
             'repetition': self.current_repetition,
             'seed': seed,
-            'eval': deepcopy(self.latest_epoch_metrics.get('eval', {}).get(ds_name, {})),
-            'test': deepcopy(self.latest_epoch_metrics.get('test', {}).get(ds_name, {})),
+            'eval': deepcopy(
+                eval_metrics if eval_metrics is not None
+                else self.latest_epoch_metrics.get('eval', {}).get(ds_name, {})
+            ),
+            'test': deepcopy(
+                test_metrics if test_metrics is not None
+                else self.latest_epoch_metrics.get('test', {}).get(ds_name, {})
+            ),
         })
+
+    def _compute_eval_loss(self, overall_metrics: dict) -> float:
+        """Compute weighted average evaluation loss across datasets."""
+        total_loss = torch.tensor(0.0, device=self.device)
+        total_cnt = torch.tensor(0, device=self.device)
+
+        for ds_name in self.ds_info.keys():
+            total_loss += overall_metrics[ds_name]['loss_sum'].reshape([])
+            total_cnt += overall_metrics[ds_name]['cnt'].reshape([])
+
+        return (total_loss / total_cnt.float()).cpu().item() if total_cnt > 0 else float("inf")
 
     def _log_repetition_summary(self, repetition_results: Dict[str, List[Dict[str, Any]]], split: str = 'test'):
         if not get_is_master():
@@ -1411,7 +1430,13 @@ class AbstractTrainer(ABC):
         
         logger.info("LoRA checkpoint loaded successfully")
     
-    def save_checkpoint(self, ds_name: Optional[str] = None, is_milestone: bool = False, **kwargs):
+    def save_checkpoint(
+            self,
+            ds_name: Optional[str] = None,
+            is_milestone: bool = False,
+            is_best: bool = False,
+            **kwargs
+    ):
         """Save checkpoint with unified path management."""
         if not get_is_master():
             return
@@ -1437,7 +1462,12 @@ class AbstractTrainer(ABC):
         }
 
         # Save checkpoint
-        suffix = 'last' if is_milestone else f'epoch_{self.epoch}'
+        if is_best:
+            suffix = 'best'
+        elif is_milestone:
+            suffix = 'last'
+        else:
+            suffix = f'epoch_{self.epoch}'
         checkpoint_path = checkpoint_dir / f'{self.model_type}_{ds_name}_{suffix}.pt'
         torch.save(checkpoint, checkpoint_path)
 
@@ -1530,6 +1560,10 @@ class AbstractTrainer(ABC):
             self.setup_optimizer_and_scheduler(model, train_loader)
 
             logger.info(f"Training setup complete. Starting {self.cfg.training.max_epochs} epochs...")
+            best_val_loss = float("inf")
+            best_epoch = -1
+            best_eval_metrics: Dict[str, Dict[str, float]] = {}
+            best_test_metrics: Dict[str, Dict[str, float]] = {}
 
             # Training loop
             for epoch in range(self.cfg.training.max_epochs):
@@ -1539,8 +1573,27 @@ class AbstractTrainer(ABC):
 
                 self.train_epoch(train_loader, train_sampler)
 
-                self.eval_epoch(valid_loaders, 'eval')
-                self.eval_epoch(test_loaders, 'test')
+                eval_overall = self.eval_epoch(valid_loaders, 'eval')
+                eval_loss = self._compute_eval_loss(eval_overall)
+
+                if get_is_master():
+                    logger.info(
+                        f"Validation loss at epoch {epoch}: {eval_loss:.6f} "
+                        f"(best={best_val_loss:.6f})"
+                    )
+
+                if eval_loss < best_val_loss:
+                    best_val_loss = eval_loss
+                    best_epoch = epoch
+                    if get_is_master():
+                        best_eval_metrics = deepcopy(self.latest_epoch_metrics.get('eval', {}))
+                    self.eval_epoch(test_loaders, 'test')
+                    if get_is_master():
+                        best_test_metrics = deepcopy(self.latest_epoch_metrics.get('test', {}))
+                        logger.info(
+                            f"New best checkpoint at epoch {epoch} with validation loss {best_val_loss:.6f}"
+                        )
+                    self.save_checkpoint(is_best=True)
 
                 # Save checkpoint
                 if (epoch + 1) % self.cfg.logging.ckpt_interval == 0:
@@ -1549,8 +1602,24 @@ class AbstractTrainer(ABC):
             self.save_checkpoint(is_milestone=True)
 
             if get_is_master():
+                if best_epoch < 0:
+                    self.eval_epoch(test_loaders, 'test')
+                    best_test_metrics = deepcopy(self.latest_epoch_metrics.get('test', {}))
+                    best_eval_metrics = deepcopy(self.latest_epoch_metrics.get('eval', {}))
+                    best_epoch = self.cfg.training.max_epochs - 1
+
+                logger.info(
+                    f"Best checkpoint for repetition {self.current_repetition}: "
+                    f"epoch={best_epoch}, validation loss={best_val_loss:.6f}"
+                )
                 for ds_name in self.ds_info.keys():
-                    self._append_repetition_metrics(repetition_results, ds_name=ds_name, seed=rep_seed)
+                    self._append_repetition_metrics(
+                        repetition_results,
+                        ds_name=ds_name,
+                        seed=rep_seed,
+                        eval_metrics=best_eval_metrics.get(ds_name, {}),
+                        test_metrics=best_test_metrics.get(ds_name, {}),
+                    )
 
         self._log_repetition_summary(repetition_results, split='test')
         logger.info("Training completed successfully!")
@@ -1604,6 +1673,10 @@ class AbstractTrainer(ABC):
 
                 logger.info(f"Per dataset training setup complete for {ds_name}. ")
                 logger.info(f"Starting {self.cfg.training.max_epochs} epochs...")
+                best_val_loss = float("inf")
+                best_epoch = -1
+                best_eval_metrics: Dict[str, float] = {}
+                best_test_metrics: Dict[str, float] = {}
 
                 # Training loop for this dataset
                 for epoch in range(self.cfg.training.max_epochs):
@@ -1613,15 +1686,54 @@ class AbstractTrainer(ABC):
 
                     self.train_epoch(train_loader, train_sampler)
 
-                    self.eval_epoch([valid_loader], 'eval')
-                    self.eval_epoch([test_loader], 'test')
+                    eval_overall = self.eval_epoch([valid_loader], 'eval')
+                    eval_loss = self._compute_eval_loss(eval_overall)
+
+                    if get_is_master():
+                        logger.info(
+                            f"{ds_name} validation loss at epoch {epoch}: {eval_loss:.6f} "
+                            f"(best={best_val_loss:.6f})"
+                        )
+
+                    if eval_loss < best_val_loss:
+                        best_val_loss = eval_loss
+                        best_epoch = epoch
+                        if get_is_master():
+                            best_eval_metrics = deepcopy(self.latest_epoch_metrics.get('eval', {}).get(ds_name, {}))
+
+                        self.eval_epoch([test_loader], 'test')
+                        if get_is_master():
+                            best_test_metrics = deepcopy(self.latest_epoch_metrics.get('test', {}).get(ds_name, {}))
+                            logger.info(
+                                f"{ds_name}: new best checkpoint at epoch {epoch} "
+                                f"with validation loss {best_val_loss:.6f}"
+                            )
+                        self.save_checkpoint(ds_name=ds_name, is_best=True)
 
                     # Save checkpoint
                     if (epoch + 1) % self.cfg.logging.ckpt_interval == 0:
                         self.save_checkpoint(ds_name=ds_name)
 
+                if best_epoch < 0:
+                    self.eval_epoch([test_loader], 'test')
+                    if get_is_master():
+                        best_test_metrics = deepcopy(self.latest_epoch_metrics.get('test', {}).get(ds_name, {}))
+                        best_eval_metrics = deepcopy(self.latest_epoch_metrics.get('eval', {}).get(ds_name, {}))
+                    best_epoch = self.cfg.training.max_epochs - 1
+
+                if get_is_master():
+                    logger.info(
+                        f"{ds_name}: best checkpoint epoch={best_epoch}, validation loss={best_val_loss:.6f}"
+                    )
+
                 self.save_checkpoint(ds_name, is_milestone=True)
-                self._append_repetition_metrics(repetition_results, ds_name=ds_name, seed=ds_seed)
+                self._append_repetition_metrics(
+                    repetition_results,
+                    ds_name=ds_name,
+                    seed=ds_seed,
+                    eval_metrics=best_eval_metrics,
+                    test_metrics=best_test_metrics,
+                )
                 logger.info(f"Training completed for {ds_name}!")
 
         self._log_repetition_summary(repetition_results, split='test')
