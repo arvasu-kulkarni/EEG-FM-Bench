@@ -19,3 +19,8 @@ data.lock
 *.pt
 *.ckpt
 *.pth
+throw.ipynb
+wget-log
+*.safetensors
+*.log
+*.txt
