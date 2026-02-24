@@ -7,10 +7,11 @@ import logging
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import comet_ml
 import datasets
+import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -83,6 +84,9 @@ class AbstractTrainer(ABC):
         self.cfg = cfg
         self.model_type = cfg.model_type
         self.multitask = cfg.multitask
+        self.num_repetitions = self._resolve_num_repetitions()
+        self.current_repetition = 1
+        self.current_repetition_seed = cfg.seed
 
         self.device = None
         self.model = None
@@ -117,6 +121,105 @@ class AbstractTrainer(ABC):
 
         # Lazy-created pretrain reconstruction head (registered on model)
         self._pretrain_recon_head = None
+
+        # Last full-epoch metrics per split and dataset
+        # Structure: {split: {dataset: {metric_name: value}}}
+        self.latest_epoch_metrics: Dict[str, Dict[str, Dict[str, float]]] = {
+            'eval': {},
+            'test': {},
+        }
+
+    def _resolve_num_repetitions(self) -> int:
+        repetition = int(getattr(self.cfg, 'repetition', 1))
+        reps = getattr(self.cfg, 'reps', None)
+        if reps is not None:
+            reps = int(reps)
+            if repetition != 1 and reps != repetition:
+                logger.warning(
+                    f"Both 'repetition'={repetition} and 'reps'={reps} are set. Using reps={reps}."
+                )
+            repetition = reps
+
+        if repetition < 1:
+            raise ValueError(f"repetition/reps must be >= 1, got {repetition}")
+        return repetition
+
+    def _set_run_seed(self, seed: int):
+        seed_torch(seed)
+        if self.dataloader_factory is not None and hasattr(self.dataloader_factory, 'seed'):
+            self.dataloader_factory.seed = seed
+
+    @staticmethod
+    def _strip_dataset_metrics(metrics: Dict[str, float], ds_name: str, prefix: str) -> Dict[str, float]:
+        metric_prefix = f"{ds_name}/{prefix}/"
+        stripped = {}
+        for key, value in metrics.items():
+            if key.startswith(metric_prefix):
+                name = key[len(metric_prefix):]
+                if isinstance(value, (int, float)):
+                    stripped[name] = float(value)
+        return stripped
+
+    def _append_repetition_metrics(
+            self,
+            repetition_results: Dict[str, List[Dict[str, Any]]],
+            ds_name: str,
+            seed: int,
+    ):
+        if not get_is_master():
+            return
+
+        repetition_results.setdefault(ds_name, []).append({
+            'repetition': self.current_repetition,
+            'seed': seed,
+            'eval': deepcopy(self.latest_epoch_metrics.get('eval', {}).get(ds_name, {})),
+            'test': deepcopy(self.latest_epoch_metrics.get('test', {}).get(ds_name, {})),
+        })
+
+    def _log_repetition_summary(self, repetition_results: Dict[str, List[Dict[str, Any]]], split: str = 'test'):
+        if not get_is_master():
+            return
+
+        logger.info(f"Final {split} summary across repetitions")
+        logger.info(
+            "Format per metric: avg +/- std, max +/- fluctuation "
+            "(fluctuation = max - min across repetitions)"
+        )
+
+        for ds_name, records in repetition_results.items():
+            if len(records) == 0:
+                logger.warning(f"No repetition metrics collected for dataset {ds_name}")
+                continue
+
+            seeds = [record['seed'] for record in records]
+            logger.info(f"Dataset {ds_name}: {len(records)} repetition(s), seeds={seeds}")
+
+            metric_names = sorted({
+                metric_name
+                for record in records
+                for metric_name in record.get(split, {}).keys()
+                if metric_name != 'epoch'
+            })
+
+            for metric_name in metric_names:
+                metric_values = [
+                    record[split][metric_name]
+                    for record in records
+                    if metric_name in record.get(split, {})
+                ]
+                if len(metric_values) == 0:
+                    continue
+
+                arr = np.asarray(metric_values, dtype=np.float64)
+                mean_val = float(arr.mean())
+                std_val = float(arr.std(ddof=0))
+                max_val = float(arr.max())
+                fluctuation = float(arr.max() - arr.min())
+                logger.info(
+                    f"{ds_name}/{split}/{metric_name}: "
+                    f"avg={mean_val:.4f} +/- {std_val:.4f}, "
+                    f"max={max_val:.4f} +/- {fluctuation:.4f}"
+                )
     
     def setup_distributed(self):
         """Setup distributed training environment."""
@@ -1238,6 +1341,7 @@ class AbstractTrainer(ABC):
                     torch.distributed.barrier()
 
             log_dict = {}
+            current_split_metrics: Dict[str, Dict[str, float]] = {}
             for ds_name in self.ds_info.keys():
                 if is_dist:
                     torch.distributed.all_reduce(overall_metrics[ds_name]['loss_sum'], op=torch.distributed.ReduceOp.SUM)
@@ -1261,8 +1365,12 @@ class AbstractTrainer(ABC):
                     )
 
                     log_dict = log_dict | metrics
+                    current_split_metrics[ds_name] = self._strip_dataset_metrics(metrics, ds_name=ds_name, prefix=prefix)
                     log_console = format_console_log_dict(metrics, prefix=f"{ds_name}/{prefix}")
                     logger.info(log_console)
+
+            if get_is_master():
+                self.latest_epoch_metrics[prefix] = current_split_metrics
 
             if get_is_master() and self.cfg.logging.use_cloud:
                 log_cloud = self._create_ft_cloud_log_data(log_dict, prefix, overall_metrics)
@@ -1308,11 +1416,13 @@ class AbstractTrainer(ABC):
         if not get_is_master():
             return
 
+        rep_parts = [f"rep_{self.current_repetition:02d}"] if self.num_repetitions > 1 else []
+
         if ds_name is None:
             ds_name = 'unified'
-            checkpoint_dir = Path(self.ckpt_dir, ds_name)
+            checkpoint_dir = Path(self.ckpt_dir, *rep_parts, ds_name)
         else:
-            checkpoint_dir = Path(self.ckpt_dir, 'seperated', ds_name)
+            checkpoint_dir = Path(self.ckpt_dir, *rep_parts, 'seperated', ds_name)
 
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1362,7 +1472,7 @@ class AbstractTrainer(ABC):
         logger.info(f"LoRA checkpoint saved: {lora_checkpoint_path} ({lora_param_count:,} params)")
 
     def run(self):
-        seed_torch(self.cfg.seed)
+        self._set_run_seed(self.cfg.seed)
         self.setup_distributed()
         self.setup_logging()
         self.init_cloud_logging()
@@ -1370,90 +1480,58 @@ class AbstractTrainer(ABC):
         logger.info(f"Starting {self.cfg.model_type} training with configuration:")
         logger.info(f"  - Datasets: {self.num_ds} {list(self.cfg.data.datasets.keys())}")
         logger.info(f"  - Multitask: {self.cfg.multitask}")
+        logger.info(f"  - Repetitions: {self.num_repetitions}")
+        logger.info(f"  - Base seed: {self.cfg.seed}")
         logger.info(f"  - Max epochs: {self.cfg.training.max_epochs}")
         logger.info(f"  - Output directory: {self.log_dir} -- {self.ckpt_dir}")
 
         """Main training loop - supports both multitask and separate models patterns."""
-        if self.cfg.multitask:
-            logger.info("Using separate models training pattern - one model per dataset")
-            self.run_unified_training()
-        else:
-            logger.info("Using unified/multitask training pattern - single shared model")
-            self.run_separate_training()
+        try:
+            if self.cfg.multitask:
+                logger.info("Using unified/multitask training pattern - single shared model")
+                self.run_unified_training()
+            else:
+                logger.info("Using separate models training pattern - one model per dataset")
+                self.run_separate_training()
+        finally:
+            self.finish_cloud_logging()
+            clean_torch_distributed(self.local_rank)
 
     def run_unified_training(self):
-        """Original unified training loop for multitask or single dataset training."""
+        """Original unified training loop for multitask training."""
         torch.distributed.barrier()
 
-        self.collect_dataset_info(mixed=True)
-        model = self.setup_model()
+        repetition_results: Dict[str, List[Dict[str, Any]]] = {ds_name: [] for ds_name in self.ds_conf.keys()}
+        for rep_idx in range(self.num_repetitions):
+            self.current_repetition = rep_idx + 1
+            rep_seed = self.cfg.seed + rep_idx
+            self.current_repetition_seed = rep_seed
+            self._set_run_seed(rep_seed)
+            self.epoch = 0
+            self.current_step = 0
 
-        train_loader, train_sampler = self.create_dataloader(datasets.Split.TRAIN)
-        valid_loaders, _ = self.create_dataloader(datasets.Split.VALIDATION)
-        test_loaders, _ = self.create_dataloader(datasets.Split.TEST)
-
-        if not isinstance(train_loader, DataLoader) or not isinstance(train_sampler, DistributedGroupBatchSampler):
-            raise TypeError('train_loader and train_sampler must be of type DataLoader')
-
-        # Setup optimizer and scheduler
-        self.setup_optimizer_and_scheduler(model, train_loader)
-
-        logger.info(f"Training setup complete. Starting {self.cfg.training.max_epochs} epochs...")
-
-        # Training loop
-        for epoch in range(self.cfg.training.max_epochs):
-            self.epoch = epoch
-
-            torch.distributed.barrier()
-
-            self.train_epoch(train_loader, train_sampler)
-
-            self.eval_epoch(valid_loaders, 'eval')
-            self.eval_epoch(test_loaders, 'test')
-
-            # Save checkpoint
-            if (epoch + 1) % self.cfg.logging.ckpt_interval == 0:
-                self.save_checkpoint()
-
-        self.save_checkpoint(is_milestone=True)
-
-        self.finish_cloud_logging()
-        clean_torch_distributed(self.local_rank)
-
-        logger.info("Training completed successfully!")
-
-    def run_separate_training(self):
-        """Main training loop for separate models pattern - train one model per dataset."""
-        torch.distributed.barrier()
-
-        logger.info(f"Starting separate models training for {self.num_ds} datasets")
-
-        # Train each dataset separately
-        for i, (ds_name, ds_config) in enumerate(self.ds_conf.items()):
             if get_is_master():
-                logger.info(f"Training dataset {i + 1}/{self.num_ds}: {ds_name}")
+                logger.info(
+                    f"Starting repetition {self.current_repetition}/{self.num_repetitions} "
+                    f"(seed={rep_seed})"
+                )
 
-            self.collect_dataset_info(mixed=False, ds_name=ds_name)
+            self.collect_dataset_info(mixed=True)
             model = self.setup_model()
 
-            train_loader, train_sampler = self.create_single_dataloader(ds_name, ds_config, datasets.Split.TRAIN)
-            valid_loader, _ = self.create_single_dataloader(ds_name, ds_config, datasets.Split.VALIDATION)
-            test_loader, _ = self.create_single_dataloader(ds_name, ds_config, datasets.Split.TEST)
+            train_loader, train_sampler = self.create_dataloader(datasets.Split.TRAIN)
+            valid_loaders, _ = self.create_dataloader(datasets.Split.VALIDATION)
+            test_loaders, _ = self.create_dataloader(datasets.Split.TEST)
 
             if not isinstance(train_loader, DataLoader) or not isinstance(train_sampler, DistributedGroupBatchSampler):
                 raise TypeError('train_loader and train_sampler must be of type DataLoader')
-            if not isinstance(valid_loader, DataLoader):
-                raise TypeError('valid_loader must be of type DataLoader')
-            if not isinstance(test_loader, DataLoader):
-                raise TypeError('test_loader must be of type DataLoader')
 
             # Setup optimizer and scheduler
             self.setup_optimizer_and_scheduler(model, train_loader)
 
-            logger.info(f"Per dataset training setup complete for {ds_name}. ")
-            logger.info(f"Starting {self.cfg.training.max_epochs} epochs...")
+            logger.info(f"Training setup complete. Starting {self.cfg.training.max_epochs} epochs...")
 
-            # Training loop for this dataset
+            # Training loop
             for epoch in range(self.cfg.training.max_epochs):
                 self.epoch = epoch
 
@@ -1461,21 +1539,90 @@ class AbstractTrainer(ABC):
 
                 self.train_epoch(train_loader, train_sampler)
 
-                self.eval_epoch([valid_loader], 'eval')
-                self.eval_epoch([test_loader], 'test')
+                self.eval_epoch(valid_loaders, 'eval')
+                self.eval_epoch(test_loaders, 'test')
 
                 # Save checkpoint
                 if (epoch + 1) % self.cfg.logging.ckpt_interval == 0:
-                    self.save_checkpoint(ds_name=ds_name)
+                    self.save_checkpoint()
 
-            self.save_checkpoint(ds_name, is_milestone=True)
+            self.save_checkpoint(is_milestone=True)
 
-            logger.info(f"Training completed for {ds_name}!")
+            if get_is_master():
+                for ds_name in self.ds_info.keys():
+                    self._append_repetition_metrics(repetition_results, ds_name=ds_name, seed=rep_seed)
 
-            self.epoch = 0
-            self.current_step = 0
+        self._log_repetition_summary(repetition_results, split='test')
+        logger.info("Training completed successfully!")
 
-        self.finish_cloud_logging()
-        clean_torch_distributed(self.local_rank)
+    def run_separate_training(self):
+        """Main training loop for separate models pattern - train one model per dataset."""
+        torch.distributed.barrier()
+
+        logger.info(f"Starting separate models training for {self.num_ds} datasets")
+        repetition_results: Dict[str, List[Dict[str, Any]]] = {ds_name: [] for ds_name in self.ds_conf.keys()}
+
+        for rep_idx in range(self.num_repetitions):
+            self.current_repetition = rep_idx + 1
+            rep_seed = self.cfg.seed + rep_idx * self.num_ds
+            self.current_repetition_seed = rep_seed
+            if get_is_master():
+                logger.info(
+                    f"Starting repetition {self.current_repetition}/{self.num_repetitions} "
+                    f"(base_seed={rep_seed})"
+                )
+
+            # Train each dataset separately
+            for i, (ds_name, ds_config) in enumerate(self.ds_conf.items()):
+                ds_seed = rep_seed + i
+                self._set_run_seed(ds_seed)
+                self.epoch = 0
+                self.current_step = 0
+
+                if get_is_master():
+                    logger.info(
+                        f"Training dataset {i + 1}/{self.num_ds}: {ds_name} "
+                        f"(seed={ds_seed})"
+                    )
+
+                self.collect_dataset_info(mixed=False, ds_name=ds_name)
+                model = self.setup_model()
+
+                train_loader, train_sampler = self.create_single_dataloader(ds_name, ds_config, datasets.Split.TRAIN)
+                valid_loader, _ = self.create_single_dataloader(ds_name, ds_config, datasets.Split.VALIDATION)
+                test_loader, _ = self.create_single_dataloader(ds_name, ds_config, datasets.Split.TEST)
+
+                if not isinstance(train_loader, DataLoader) or not isinstance(train_sampler, DistributedGroupBatchSampler):
+                    raise TypeError('train_loader and train_sampler must be of type DataLoader')
+                if not isinstance(valid_loader, DataLoader):
+                    raise TypeError('valid_loader must be of type DataLoader')
+                if not isinstance(test_loader, DataLoader):
+                    raise TypeError('test_loader must be of type DataLoader')
+
+                # Setup optimizer and scheduler
+                self.setup_optimizer_and_scheduler(model, train_loader)
+
+                logger.info(f"Per dataset training setup complete for {ds_name}. ")
+                logger.info(f"Starting {self.cfg.training.max_epochs} epochs...")
+
+                # Training loop for this dataset
+                for epoch in range(self.cfg.training.max_epochs):
+                    self.epoch = epoch
+
+                    torch.distributed.barrier()
+
+                    self.train_epoch(train_loader, train_sampler)
+
+                    self.eval_epoch([valid_loader], 'eval')
+                    self.eval_epoch([test_loader], 'test')
+
+                    # Save checkpoint
+                    if (epoch + 1) % self.cfg.logging.ckpt_interval == 0:
+                        self.save_checkpoint(ds_name=ds_name)
+
+                self.save_checkpoint(ds_name, is_milestone=True)
+                self._append_repetition_metrics(repetition_results, ds_name=ds_name, seed=ds_seed)
+                logger.info(f"Training completed for {ds_name}!")
+
+        self._log_repetition_summary(repetition_results, split='test')
         logger.info("Separate models training completed for all datasets!")
-

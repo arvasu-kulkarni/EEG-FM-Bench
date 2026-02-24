@@ -114,6 +114,8 @@ class AbstractConfig(BaseModel, ABC):
     """Abstract base configuration class for all baseline models."""
     
     seed: int = 42
+    repetition: int = 1
+    reps: Optional[int] = None
     master_port: int = 41216
     multitask: bool = False
     model_type: str = "base"  # To identify which model is being used
