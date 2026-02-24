@@ -12,16 +12,15 @@ data:
   batch_size: 32
   num_workers: 2
   datasets:
-    tuab: 'finetune'
-    seed: 'finetune_sub_dependent'
-    hmc: 'finetune'
+    bcic_2a: 'finetune'
     # ...
 
 # REVE model configuration
 model:
   # Pretrained weights
-  pretrained_path: null
-  pos_bank_pretrained_path: null
+  # NOTE: These must be local file paths. Download from HF first (see README usage).
+  pretrained_path: "/home/neurodx/arvasu/EEG-FM-Bench/assets/run/ckpt/reve_base_model.safetensors"
+  pos_bank_pretrained_path: "/home/neurodx/arvasu/EEG-FM-Bench/assets/run/ckpt/reve_positions_model.safetensors"
 
   # Architecture parameters
   embed_dim: 512
@@ -44,7 +43,7 @@ model:
 
   # Classifier head configuration
   classifier_head:
-    head_type: 'avg_pool'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
+    head_type: 'flatten_mlp'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
     
     # Common parameters
     hidden_dims: [128]
@@ -79,7 +78,7 @@ training:
 
   # Training options
   use_amp: true
-  freeze_encoder: false
+  freeze_encoder: true
   warmup_freeze_encoder: true
   warmup_freeze_encoder_epochs: 1
 
@@ -111,8 +110,8 @@ logging:
   project: "reve"
   tags:
     - "reve"
-    - "unified"
-    - "full"
+    - "bcic_2a_separate"
+    - "frozen"
     - "debug"
 
   # Logging intervals
