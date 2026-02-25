@@ -24,3 +24,4 @@ wget-log
 *.safetensors
 *.log
 *.txt
+run.sh
