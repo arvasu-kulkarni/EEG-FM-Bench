@@ -12,7 +12,7 @@ CONF_ROOT = os.getenv('EEGFM_CONF_ROOT', os.path.join(ASSETS_ROOT, 'conf'))
 
 DATABASE_RAW_ROOT = '/share/data/eegfmbench/raw/'
 DATABASE_PROC_ROOT = '/mnt/eegfmbench/proc/'
-DATABASE_CACHE_ROOT = '/share/data/eegfmbench/cache'
+DATABASE_CACHE_ROOT = '/mnt/eegfmbench/cache'
 
 
 def get_conf_file_path(path):
