@@ -24,4 +24,5 @@ wget-log
 *.safetensors
 *.log
 *.txt
+!requirements_loc.txt
 run.sh
