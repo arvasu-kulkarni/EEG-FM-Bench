@@ -32,7 +32,7 @@ data:
 # MANAS model configuration
 model:
   # Pretrained weights
-  pretrained_path: '/share/data/MAE-Ablations/MODEL_LARGE_DATAD1_LOSSR1_AUGA0.pt'
+  pretrained_path: '/share/data/MAE-Ablations/MODEL_LARGE_DATAD2_LOSSR2_AUGA1.pt'
 
   # Architecture parameters
   patch_seconds: 1.0
@@ -89,16 +89,16 @@ training:
     lora_r: 8
     lora_alpha: 16
     lora_dropout: 0.0
-    lora_target_modules: ['default']
+    lora_target_modules: ["attn", "ffn.0", "ffn.2"]
     lora_exclude_modules: null
-    lora_target_type: 'default'  # Options: default, full, attention, ffn
-    lora_scope: 'transformer'    # Options: transformer, full
+    lora_target_type: 'full'  # Options: default, full, attention, ffn
+    lora_scope: 'full'    # Options: transformer, full
     lora_lr_scale: 1.0
 
 # Logging configuration
 logging:
   experiment_name: "manas"
-  run_dir: "assets/run"
+  run_dir: "/share/data/eegfmbench/run"
 
   # Cloud logging
   use_cloud: true
@@ -111,8 +111,8 @@ logging:
     - "frozen"
     - "mlp-head"
     - "verified"
-    - "MODEL_LARGE_DATAD1_LOSSR1_AUGA0.pt"
-    - "eval best"
+    - "MODEL_LARGE_DATAD2_LOSSR2_AUGA1.pt"
+    - "modeltime - 25/02-11:49"
 
   # Logging intervals
   log_step_interval: 1
