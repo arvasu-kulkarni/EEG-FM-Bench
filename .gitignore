@@ -26,3 +26,4 @@ wget-log
 *.txt
 !requirements_loc.txt
 run.sh
+/home/neurodx/arvasu/EEG-FM-Bench/ds004504

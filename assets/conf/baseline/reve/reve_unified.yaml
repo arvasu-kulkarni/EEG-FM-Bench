@@ -91,7 +91,7 @@ training:
 
   # Training options
   use_amp: true
-  freeze_encoder: true
+  freeze_encoder: false
   warmup_freeze_encoder: true
   warmup_freeze_encoder_epochs: 1
 
@@ -124,7 +124,7 @@ logging:
   tags:
     - "reve"
     - "separate"
-    - "frozen"
+    - "full"
     - "verified"
 
   # Logging intervals

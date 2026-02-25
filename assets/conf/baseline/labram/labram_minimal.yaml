@@ -2,9 +2,10 @@
 # Uses code defaults wherever possible.
 
 model_type: "labram"
+multitask: false
+fs: 200
 
 data:
   # Required: at least one dataset mapping (dataset_name: dataset_config)
   datasets:
     tuab: "finetune"
-
