@@ -1,0 +1,10 @@
+# Minimal LabRAM config
+# Uses code defaults wherever possible.
+
+model_type: "labram"
+
+data:
+  # Required: at least one dataset mapping (dataset_name: dataset_config)
+  datasets:
+    tuab: "finetune"
+
