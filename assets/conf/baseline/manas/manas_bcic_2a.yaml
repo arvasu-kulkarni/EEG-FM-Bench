@@ -81,7 +81,8 @@ training:
 
   # Training options
   use_amp: true
-  freeze_encoder: true
+  train_method: "linear_probe"  # Options: linear_probe, partial_ft, full_ft
+  dual_stage: false             # If true: first N/2 epochs linear_probe, then train_method
 
   # LoRA configuration
   lora:

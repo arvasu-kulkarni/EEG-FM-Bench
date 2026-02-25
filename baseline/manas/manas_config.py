@@ -2,7 +2,7 @@
 MANAS configuration for EEG-FM-Bench.
 """
 
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Literal
 
 from pydantic import Field
 
@@ -41,7 +41,8 @@ class ManasTrainingArgs(BaseTrainingArgs):
     warmup_scale: float = 1.0e-1
 
     use_amp: bool = True
-    freeze_encoder: bool = False
+    train_method: Literal["linear_probe", "partial_ft", "full_ft"] = "linear_probe"
+    dual_stage: bool = False
 
 
 class ManasLoggingArgs(BaseLoggingArgs):
