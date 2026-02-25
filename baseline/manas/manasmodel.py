@@ -96,7 +96,8 @@ class EEGEmbedModel(AbstractModel):
         raw_obj = mne.io.RawArray(np.zeros((len(ch_names), 100)), mne_raw_info)
         montage = mne.channels.make_standard_montage("standard_1020")
         raw_obj.set_montage(montage, match_case=False, on_missing="raise")
-        pos = torch.tensor(list(raw_obj.get_montage().get_positions()["ch_pos"].values()), dtype=torch.float32)
+        pos_np = np.asarray(list(raw_obj.get_montage().get_positions()["ch_pos"].values()), dtype=np.float32)
+        pos = torch.from_numpy(pos_np)
         return 100 * pos
 
     def _select_channels_and_pos(self, data: np.ndarray, ch_names: List[str]) -> Tuple[np.ndarray, torch.Tensor]:
@@ -146,7 +147,8 @@ class EEGEmbedModel(AbstractModel):
         self.task_name = meta[0]["task_name"]
         self.num_classes = n_unique_labels(self.task_name)
 
-        class_weights = torch.tensor(calc_class_weights(y, self.task_name), dtype=torch.float32).to(self.device)
+        class_weights_np = np.asarray(calc_class_weights(y, self.task_name), dtype=np.float32)
+        class_weights = torch.from_numpy(class_weights_np).to(self.device)
         criterion = nn.CrossEntropyLoss(weight=class_weights)
 
         datasets = []

@@ -55,7 +55,8 @@ class ManasDatasetAdapter(AbstractDatasetAdapter):
         montage = mne.channels.make_standard_montage("standard_1020")
         raw_obj.set_montage(montage, match_case=False, on_missing="raise")
         pos = raw_obj.get_montage().get_positions()["ch_pos"].values()
-        return 100 * torch.tensor(list(pos), dtype=torch.float32)
+        pos_np = np.asarray(list(pos), dtype=np.float32)
+        return 100 * torch.from_numpy(pos_np)
 
     def _resample(self, data: torch.Tensor, orig_fs: int | None) -> torch.Tensor:
         if orig_fs is None or orig_fs == self.target_fs:
@@ -85,7 +86,8 @@ class ManasDatasetAdapter(AbstractDatasetAdapter):
         if not any(keep_mask):
             raise ValueError("No channels left after applying MANAS ignore list")
 
-        keep_tensor = torch.tensor(keep_mask, dtype=torch.bool)
+        keep_mask_np = np.asarray(keep_mask, dtype=np.bool_)
+        keep_tensor = torch.from_numpy(keep_mask_np)
         data = result['data'][keep_tensor, :]
 
         orig_fs = sample.get('fs') or sample.get('sampling_frequency')
