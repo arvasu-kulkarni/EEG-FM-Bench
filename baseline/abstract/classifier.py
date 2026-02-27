@@ -513,6 +513,7 @@ class AttentionPoolHead(nn.Module):
         # Learnable query token
         self.cls_query_token = nn.Parameter(torch.randn(1, 1, embed_dim))
         self.scale = head_dim ** -0.5
+        self.last_attention_weights: Optional[Tensor] = None
 
         # Build MLP
         layers = []
@@ -545,6 +546,7 @@ class AttentionPoolHead(nn.Module):
         # Attention: [B, 1, D] x [B, D, T*C] -> [B, 1, T*C]
         attention_scores = torch.matmul(query, x.transpose(-1, -2)) * self.scale
         attention_weights = torch.softmax(attention_scores, dim=-1)
+        self.last_attention_weights = attention_weights.detach()
 
         # Weighted sum: [B, 1, T*C] x [B, T*C, D] -> [B, 1, D] -> [B, D]
         pooled = torch.matmul(attention_weights, x).squeeze(1)

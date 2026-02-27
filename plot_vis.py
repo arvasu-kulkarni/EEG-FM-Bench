@@ -20,7 +20,13 @@ from common.log import setup_log
 from common.path import get_conf_file_path
 from common.utils import setup_yaml
 from plot.baseline_visualizer import BaselineVisualizer
-from plot.utils.conf import load_vis_conf_dict, TsneVisArgs, GradCamVisArgs, IntegratedGradientsVisArgs
+from plot.utils.conf import (
+    load_vis_conf_dict,
+    TsneVisArgs,
+    GradCamVisArgs,
+    IntegratedGradientsVisArgs,
+    HeadMlpVisArgs,
+)
 
 logger = logging.getLogger()
 
@@ -57,7 +63,7 @@ def load_model_config(config_path: str) -> AbstractConfig:
 def main():
     """Main visualization function."""
     parser = argparse.ArgumentParser(description="Traditional visualization for baseline models")
-    parser.add_argument("vis_type", choices=["t_sne", "grad_cam", "integrated_gradients"])
+    parser.add_argument("vis_type", choices=["t_sne", "grad_cam", "integrated_gradients", "head_mlp"])
     parser.add_argument("model_config", help="Path to baseline model config yaml")
     parser.add_argument("vis_config", help="Path to visualization config yaml")
     args = parser.parse_args()
@@ -82,6 +88,9 @@ def main():
         vis_config: GradCamVisArgs = load_vis_conf_dict(args.vis_config, args.vis_type)
         model_config.model.grad_cam = True
         model_config.model.grad_cam_target = vis_config.grad_cam_target
+    elif args.vis_type == 'head_mlp':
+        vis_config: HeadMlpVisArgs = load_vis_conf_dict(args.vis_config, args.vis_type)
+        model_config.model.t_sne = True
     else:
         vis_config: IntegratedGradientsVisArgs = load_vis_conf_dict(args.vis_config, args.vis_type)
 

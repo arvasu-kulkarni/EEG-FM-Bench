@@ -1,4 +1,4 @@
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Literal
 
 from pydantic import Field
 
@@ -29,6 +29,10 @@ class ReveModelArgs(BaseModelArgs):
     patch_overlap: int = 20
 
     dropout: float = 0.1
+    # SDPA backend selection for attention:
+    # - auto: prefer flash/efficient/math
+    # - flash/efficient/math: force a specific backend
+    sdpa_backend: Literal["auto", "flash", "efficient", "math"] = "auto"
 
 
 class ReveTrainingArgs(BaseTrainingArgs):
@@ -76,4 +80,3 @@ class ReveConfig(AbstractConfig):
 
     def validate_config(self) -> bool:
         return True
-

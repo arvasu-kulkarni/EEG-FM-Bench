@@ -9,7 +9,7 @@
 
 *A comprehensive benchmark for systematic and standardized evaluation of EEG foundation models*
 
-[✨ Features](#-key-features) • [📈 Results](#-benchmark-results) • [📁 Project Structure](#-project-structure) • [🚀 Quick Start](#-quick-start) • [📊 Datasets](#-datasets) • [🏗️ Models](#-supported-models)
+[🧭 Fork Guide](#-fork-guide-this-branch) • [✨ Features](#-key-features) • [📈 Results](#-benchmark-results) • [📁 Project Structure](#-project-structure) • [🚀 Quick Start](#-quick-start) • [📊 Datasets](#-datasets) • [🏗️ Models](#-supported-models)
 
 [🖥️ HPC](#-high-performance-computing) • [📖 Documentation](#-documentation) • [🤝 Limitations & Contributing](#-limitations--contributing) • [📚 Others](#-citations)
 
@@ -43,6 +43,80 @@ Compared to earlier **v1**, we now add significant new features and insights:
 - **New benchmark insights**: multi-task learning as a **regularizer** in data-scarce EEG, and **gradient conflicts / objective misalignment** as a pre-training efficiency bottleneck
 - **Scaling**: performance does **not** simply follow “bigger is better”; compact EEG-specific inductive biases can outperform much larger models
 
+## 🧭 Fork Guide (This Branch)
+
+This branch (`v2`) is forked from upstream `v2` at commit `433914e` and adds practical changes for local/cluster benchmarking workflows.
+
+### Changes since fork
+
+- **New MANAS baseline integration**:
+  - Added MANAS implementation and trainer under `baseline/manas/`
+  - Added MANAS config template: `assets/conf/baseline/manas/manas_bcic_2a.yaml`
+  - Added MANAS-specific training strategies (`linear_probe`, `partial_ft`, `full_ft`) with optional `dual_stage`
+- **MANAS MAE backend switch**:
+  - Added `model.mae_type` to choose MAE backend (`default` or `mahir`)
+  - `mahir` uses `baseline/manas/manasfiles/mahirmodel.py` for compatibility with Mahir-format checkpoints
+- **Strict checkpoint-first MANAS workflow**:
+  - MANAS requires `model.pretrained_path` and does not intentionally start from scratch
+  - Incompatible MANAS checkpoints fail early during load
+- **More ready-to-run configs**:
+  - Added separate evaluation configs for LaBraM and CBraMod
+  - Added preprocessing configs for ADFTD / BCIC-2a / EEGMAT / HMC / PhysioMI / Siena
+- **Training workflow updates**:
+  - Added repetition support (`repetition` / `reps`) with per-repetition metric summaries
+  - Additional speed/stability updates in trainer and eval loops
+- **Local storage-path adaptation**:
+  - Updated defaults in `common/path.py` for shared block-storage style environments
+
+### How to run this fork
+
+1. Install dependencies:
+   ```bash
+   # Install torch from pytorch.org for your CUDA/runtime first
+   pip install -r requirements.txt
+   ```
+2. Configure paths:
+   - `EEGFM_PROJECT_ROOT` and `EEGFM_CONF_ROOT` can be set via environment variables.
+   - `RUN_ROOT`, `DATABASE_RAW_ROOT`, `DATABASE_PROC_ROOT`, and `DATABASE_CACHE_ROOT` are currently set in `common/path.py`; update them for your environment before first run.
+3. Preprocess datasets:
+   ```bash
+   python preproc.py conf_file=preproc/preproc_bcic_2a.yaml
+   # or:
+   python preproc.py conf_file=preproc/preproc_adftd.yaml
+   ```
+4. Train/evaluate baseline models:
+   ```bash
+   # MANAS
+   python baseline_main.py conf_file=baseline/manas/manas_bcic_2a.yaml model_type=manas
+
+   # EEGPT
+   python baseline_main.py conf_file=baseline/eegpt/eegpt_unified.yaml model_type=eegpt
+
+   # LaBraM / CBraMod eval-style configs
+   python baseline_main.py conf_file=baseline/labram/labram_eval.yaml model_type=labram
+   python baseline_main.py conf_file=baseline/cbramod/cbramod_eval.yaml model_type=cbramod
+   ```
+5. Run analysis pipeline:
+   ```bash
+   python analysis_run.py \
+     --config assets/conf/analysis/analysis_example.yaml \
+     --trainer-config assets/conf/baseline/csbrain/csbrain_unified.yaml
+
+   python analysis_vis.py --data-dir ./analysis_results/scratch_vs_pretrained_YYYYMMDD_HHMMSS
+   ```
+
+### What to watch out for
+
+- **Absolute paths in configs**: several YAML files ship with machine-specific checkpoint/log paths. Update `pretrained_path` and `logging.run_dir` before running.
+- **MANAS checkpoint compatibility**:
+  - If checkpoint was trained with Mahir MAE, set `model.mae_type: mahir`
+  - If it was trained with default MAE, use `model.mae_type: default`
+  - Wrong `mae_type` usually shows state-dict mismatch during load
+- **Path roots are not fully env-driven**: setting `EEGFM_PROJECT_ROOT` alone is not enough if your dataset/run roots differ from `common/path.py`.
+- **Optional dependency conflicts**: `braindecode`, `moabb`, and `captum` are optional and can introduce version constraints (especially around torch/numpy).
+- **Distributed run ports**: if running multiple jobs on the same host, ensure each config uses a unique `master_port`.
+- **Data download/licensing**: datasets are not bundled; each source has separate licensing/access steps.
+
 
 ## ✨ Key Features
 
@@ -55,6 +129,7 @@ Comprehensive evaluation of state-of-the-art EEG foundation models:
 - **LaBraM** - Large brain model with vector quantization
 - **CSBrain** - Brain-region-aware attention for EEG decoding
 - **REVE** - 4D Fourier positional embedding + 19TB pre-training datasets
+- **MANAS** - MAE-based EEG representation model with selectable MAE backend (`default` / `mahir`)
 
 General time-series foundation models:
 - **Mantis** - Token generation + ViT backbone for multivariate time series
@@ -136,6 +211,7 @@ EEG-FM-Bench/
 │   ├── csbrain/           #    CSBrain: Brain-region-aware attention
 │   ├── mantis/            #    Mantis: Token generation + ViT
 │   ├── moment/            #    MOMENT: Time-series FM (T5 encoder)
+│   ├── manas/             #    MANAS: MAE-based EEG encoder + unified trainer
 │   ├── eegpt/             #    EEGPT: Dual self-supervised learning
 │   ├── labram/            #    LaBraM: Vector quantized brain model
 │   ├── eegnet/            #    EEGNet: Compact CNN baseline
@@ -178,22 +254,21 @@ pip install -r requirements.txt
 
 ### ⚙️ Configuration Setup
 
-Step 1: **Set project paths** (via environment variables; defaults to `./assets/...` if not set).
+Step 1: **Set project paths**.
 
-You can define the path in `./common/path.py` directly, or set environment variables in your shell profile for more flexibility.
+`EEGFM_PROJECT_ROOT` and `EEGFM_CONF_ROOT` can be set via environment variables.  
+`RUN_ROOT`, `DATABASE_RAW_ROOT`, `DATABASE_PROC_ROOT`, and `DATABASE_CACHE_ROOT` are defined in `common/path.py` and should be edited if your filesystem layout differs.
 
 For bash/zsh:
 ```bash
 export EEGFM_PROJECT_ROOT=$PWD
 export EEGFM_CONF_ROOT=$PWD/assets/conf
-export EEGFM_RUN_ROOT=$PWD/assets/run
 ```
 
 For PowerShell:
 ```powershell
 $env:EEGFM_PROJECT_ROOT = (Get-Location).Path
 $env:EEGFM_CONF_ROOT = "$env:EEGFM_PROJECT_ROOT/assets/conf"
-$env:EEGFM_RUN_ROOT = "$env:EEGFM_PROJECT_ROOT/assets/run"
 ```
 
 Step 2: **Configure your experiment** using YAML files under `assets/conf/` (values not assigned will be filled by the corresponding Pydantic config class):
@@ -227,6 +302,7 @@ python preproc.py conf_file=preproc/preproc_example.yaml
 ```bash
 # Fine-Tuning (examples for different models)
 python baseline_main.py conf_file=baseline/eegpt/eegpt_unified.yaml model_type=eegpt
+python baseline_main.py conf_file=baseline/manas/manas_bcic_2a.yaml model_type=manas
 
 # List model types supported by the unified entrypoint
 python baseline_main.py list-models
@@ -239,6 +315,9 @@ python plot_vis.py t_sne assets/conf/baseline/csbrain/csbrain_unified.yaml plot/
 
 # Create integrated gradients analysis
 python plot_vis.py integrated_gradients assets/conf/baseline/csbrain/csbrain_unified.yaml plot/configs/example/integrated_gradients_config_csbrain.yaml
+
+# Compare downstream head methods (avg_pool / attention_pool / flatten_mlp)
+python plot_vis.py head_mlp assets/conf/baseline/cbramod/cbramod_eval.yaml plot/configs/example/head_mlp_config.yaml
 ```
 
 #### Step 4: Gradient/Representation Analysis (New)
@@ -389,6 +468,7 @@ vim assets/conf/preproc/preproc_example.yaml
 | **LaBraM** | Vector Quantized VAE + Transformer | Discrete neural codebook |
 | **CSBrain** | Transformer | Brain-region-aware attention |
 | **REVE** | Transformer | 4D Fourier positional embedding + 19TB datasets |
+| **MANAS** | MAE-based Transformer | MAE pretraining + selectable MAE implementation backend |
 | **Mantis** | ViT-style Transformer | Token generation for multivariate time series |
 | **MOMENT** | T5 Encoder | Time-series foundation model backbone |
 

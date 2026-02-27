@@ -14,6 +14,7 @@ from data.dataset.bcic.bcic_2a import BCIC2ABuilder
 from data.dataset.brain_lat import BrainLatBuilder
 from data.dataset.chisco import ChiscoBuilder
 from data.dataset.emobrain import EmobrainBuilder
+from data.dataset.epilepsy_pnes_20s import EpilepsyPnes20sBuilder
 from data.dataset.grasp_and_lift import GraspAndLiftBuilder
 from data.dataset.hbn import HBNBuilder
 from data.dataset.hmc import HMCBuilder
@@ -86,6 +87,7 @@ DATASET_SELECTOR: dict[str, Type[EEGDatasetBuilder]] = {
     'inner_speech': InnerSpeechBuilder,
     'chisco': ChiscoBuilder,
     'open_miir': OpenMiirBuilder,
+    'epilepsy_pnes_20s': EpilepsyPnes20sBuilder,
 }
 
 def get_dataset_patch_len(dataset_name: str, config_name: str) -> int:
@@ -226,5 +228,4 @@ if __name__ == '__main__':
 
     for batch in loader:
         pass
-
 

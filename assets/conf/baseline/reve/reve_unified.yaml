@@ -14,18 +14,19 @@ data:
   datasets:
     # seed: 'finetune'
     motor_mv_img: 'finetune'
-    workload: 'finetune'
+    # workload: 'finetune'
     # tuev: 'finetune'
     # tuab: 'finetune'
-    hmc: 'finetune'
-    siena_scalp: 'finetune'
+    # hmc: 'finetune'
+    # siena_scalp: 'finetune'
     # tusl: 'finetune'
     # mimul_11: 'finetune'
     # things_eeg_2: 'finetune'
     # seed_v: 'finetune'
-    adftd: 'finetune'
+    # adftd: 'finetune'
     bcic_2a: 'finetune'
     # seed_vii: 'finetune'
+    epilepsy_pnes_20s: 'finetune'
     # ...
 
 # REVE model configuration
@@ -53,6 +54,8 @@ model:
 
   # Regularization
   dropout: 0.1
+  # Force math SDPA to avoid flash/efficient kernel instability on some CUDA stacks
+  sdpa_backend: "math"
 
   # Classifier head configuration
   classifier_head:
@@ -76,7 +79,7 @@ model:
 
 # Training configuration
 training:
-  max_epochs: 12
+  max_epochs: 30
   weight_decay: 0.01
   max_grad_norm: 1.0
 
@@ -91,7 +94,7 @@ training:
 
   # Training options
   use_amp: true
-  freeze_encoder: true
+  freeze_encoder: false
   warmup_freeze_encoder: true
   warmup_freeze_encoder_epochs: 1
 
@@ -124,7 +127,7 @@ logging:
   tags:
     - "reve"
     - "separate"
-    - "frozen"
+    - "full"
     - "verified"
 
   # Logging intervals

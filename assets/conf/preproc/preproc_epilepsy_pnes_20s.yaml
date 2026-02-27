@@ -1,0 +1,6 @@
+fs: 200
+num_preproc_arrow_writers: 16
+num_preproc_mid_workers: 16
+pretrain_datasets: []
+finetune_datasets:
+  epilepsy_pnes_20s: 'finetune'

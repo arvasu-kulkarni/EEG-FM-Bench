@@ -1,7 +1,7 @@
 import logging
 import os
 from functools import partial
-from typing import Tuple
+from typing import Tuple, Optional, Literal
 
 import torch
 from torch import nn
@@ -93,6 +93,7 @@ class LabramTrainer(AbstractTrainer):
             self.loss_fn = nn.CrossEntropyLoss(label_smoothing=self.cfg.training.label_smoothing)
         else:
             self.loss_fn = nn.CrossEntropyLoss()
+        self._last_effective_train_method: Optional[str] = None
 
     def setup_model(self):
         """Setup Labram model architecture."""
@@ -198,6 +199,87 @@ class LabramTrainer(AbstractTrainer):
             logger.warning(f"Unexpected keys when loading checkpoint: {unexpected_keys}")
         
         logger.info("Successfully loaded pretrained encoder weights")
+
+    def _effective_train_method(self) -> Literal["linear_probe", "partial_ft", "full_ft"]:
+        """Resolve training method for current epoch, including dual-stage scheduling."""
+        method: Literal["linear_probe", "partial_ft", "full_ft"] = (
+            self.cfg.training.train_method
+            if self.cfg.training.train_method is not None
+            else ("linear_probe" if self.cfg.training.freeze_encoder else "full_ft")
+        )
+        if self.cfg.training.dual_stage:
+            switch_epoch = self.cfg.training.max_epochs // 2
+            if self.epoch < switch_epoch:
+                return "linear_probe"
+        return method
+
+    def _set_encoder_trainability(self, method: Literal["linear_probe", "partial_ft", "full_ft"]):
+        """Apply encoder freezing policy according to selected train method."""
+        if self.model is None:
+            return
+
+        model = self.model.module if isinstance(self.model, torch.nn.parallel.DistributedDataParallel) else self.model
+        if not hasattr(model, "encoder"):
+            raise AttributeError("Labram model does not have an encoder attribute")
+
+        encoder = model.encoder
+
+        # Start from fully frozen encoder, then selectively unfreeze.
+        for param in encoder.parameters():
+            param.requires_grad = False
+
+        if method == "linear_probe":
+            pass
+        elif method == "partial_ft":
+            if not hasattr(encoder, "blocks") or len(encoder.blocks) == 0:
+                raise AttributeError("Labram encoder does not expose transformer blocks for partial_ft")
+            for param in encoder.blocks[-1].parameters():
+                param.requires_grad = True
+            if hasattr(encoder, "norm") and encoder.norm is not None:
+                for param in encoder.norm.parameters():
+                    param.requires_grad = True
+            if hasattr(encoder, "fc_norm") and encoder.fc_norm is not None:
+                for param in encoder.fc_norm.parameters():
+                    param.requires_grad = True
+        elif method == "full_ft":
+            for param in encoder.parameters():
+                param.requires_grad = True
+        else:
+            raise ValueError(f"Unknown train_method: {method}")
+
+        # Keep classifier trainable in all strategies.
+        if hasattr(model, "classifier"):
+            for param in model.classifier.parameters():
+                param.requires_grad = True
+
+    def setup_optimizer_and_scheduler(self, model, train_loader):
+        # Always build optimizer with encoder param group present.
+        # Runtime trainability is controlled per epoch via requires_grad flags.
+        original_freeze_encoder = self.cfg.training.freeze_encoder
+        self.cfg.training.freeze_encoder = False
+        try:
+            super().setup_optimizer_and_scheduler(model, train_loader)
+        finally:
+            self.cfg.training.freeze_encoder = original_freeze_encoder
+
+    def train_epoch(self, train_loader, train_sampler):
+        effective_method = self._effective_train_method()
+        self._set_encoder_trainability(effective_method)
+        self.cfg.training.freeze_encoder = (effective_method == "linear_probe")
+
+        if effective_method != self._last_effective_train_method:
+            configured_method = (
+                self.cfg.training.train_method
+                if self.cfg.training.train_method is not None
+                else ("linear_probe" if self.cfg.training.freeze_encoder else "full_ft")
+            )
+            logger.info(
+                f"Epoch {self.epoch}: applying train_method='{effective_method}' "
+                f"(configured='{configured_method}', dual_stage={self.cfg.training.dual_stage})"
+            )
+            self._last_effective_train_method = effective_method
+
+        super().train_epoch(train_loader, train_sampler)
 
     def pretrain_step_for_analysis(
         self,

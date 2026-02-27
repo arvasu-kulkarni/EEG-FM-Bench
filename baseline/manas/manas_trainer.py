@@ -102,10 +102,12 @@ class ManasTrainer(AbstractTrainer):
         )
         logger.info(f"Created multi-head classifier with heads: {list(head_configs.keys())}")
 
-        if cfg.pretrained_path:
-            self.load_checkpoint(cfg.pretrained_path)
-        else:
-            logger.info("No pretrained path specified, starting from scratch")
+        if not cfg.pretrained_path:
+            raise ValueError(
+                "MANAS requires model.pretrained_path. "
+                "Training from scratch is disabled."
+            )
+        self.load_checkpoint(cfg.pretrained_path)
 
         model = ManasUnifiedModel(
             encoder=self.encoder,
@@ -121,27 +123,47 @@ class ManasTrainer(AbstractTrainer):
         return model
 
     def load_checkpoint(self, checkpoint_path: str):
-        if not checkpoint_path or not os.path.exists(checkpoint_path):
-            logger.warning(f"Pretrained checkpoint not found: {checkpoint_path}")
-            return
-
-        logger.info(f"Loading pretrained weights from: {checkpoint_path}")
-        ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
-
-        if isinstance(ckpt, dict):
-            state_dict = ckpt.get('model_state_dict', ckpt.get('state_dict', ckpt))
-        else:
-            state_dict = ckpt
-
+        if not checkpoint_path:
+            raise ValueError(
+                "MANAS checkpoint path is empty. "
+                "Training from scratch is disabled."
+            )
         if self.encoder is None:
-            logger.warning("Encoder not initialized; skipping checkpoint load")
-            return
+            raise RuntimeError("MANAS encoder is not initialized before checkpoint loading.")
+
+        resolved_path = os.path.abspath(checkpoint_path)
+        if not os.path.isfile(resolved_path):
+            raise FileNotFoundError(
+                f"MANAS pretrained checkpoint not found: {checkpoint_path} "
+                f"(resolved: {resolved_path})"
+            )
+
+        logger.info(f"Loading pretrained weights from: {resolved_path}")
+        try:
+            ckpt = torch.load(resolved_path, map_location='cpu', weights_only=False)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read MANAS checkpoint: {resolved_path}") from exc
+
+        state_dict = ckpt
+        if isinstance(ckpt, dict):
+            for key in ('model_state_dict', 'state_dict', 'model', 'mae_state_dict'):
+                nested = ckpt.get(key)
+                if isinstance(nested, dict):
+                    state_dict = nested
+                    break
+
+        if not isinstance(state_dict, dict):
+            raise TypeError(
+                f"Unsupported MANAS checkpoint format at {resolved_path}: "
+                f"expected dict-like state_dict, got {type(state_dict).__name__}"
+            )
 
         missing, unexpected = self.encoder.mae.load_state_dict(state_dict, strict=False)
-        if missing:
-            logger.warning(f"Missing keys when loading checkpoint: {missing}")
-        if unexpected:
-            logger.warning(f"Unexpected keys when loading checkpoint: {unexpected}")
+        if missing or unexpected:
+            raise RuntimeError(
+                "MANAS checkpoint is incompatible with current encoder architecture. "
+                f"missing_keys={missing}, unexpected_keys={unexpected}"
+            )
 
         logger.info("Successfully loaded pretrained MANAS weights")
 

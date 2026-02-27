@@ -1,5 +1,6 @@
 import os
 import random
+import logging
 from datetime import datetime
 from functools import lru_cache
 
@@ -7,6 +8,8 @@ import torch
 
 from common.conf import BaseLogArgs
 from common.path import RUN_ROOT
+
+logger = logging.getLogger("baseline")
 
 
 @lru_cache()
@@ -139,8 +142,14 @@ def clean_torch_distributed(local_rank: int = 0):
             torch.distributed.barrier()
             torch.distributed.destroy_process_group()
     except Exception as exc:
-        raise exc
-        # logger.warning(f"Failed to clean torch.distributed state on rank {local_rank}: {exc}")
+        logger.warning(
+            f"Failed to clean torch.distributed state on rank {local_rank}: {exc}"
+        )
     finally:
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            try:
+                torch.cuda.empty_cache()
+            except Exception as exc:
+                logger.warning(
+                    f"Failed to empty CUDA cache on rank {local_rank}: {exc}"
+                )

@@ -15,24 +15,26 @@ data:
   num_workers: 2
   datasets:
     # seed: 'finetune'
-    motor_mv_img: 'finetune'
-    workload: 'finetune'
+    # motor_mv_img: 'finetune'
+    # workload: 'finetune'
     # tuev: 'finetune'
     # tuab: 'finetune'
-    hmc: 'finetune'
-    siena_scalp: 'finetune'
+    # hmc: 'finetune'
+    # siena_scalp: 'finetune'
     # tusl: 'finetune'
     # mimul_11: 'finetune'
     # things_eeg_2: 'finetune'
     # seed_v: 'finetune'
-    adftd: 'finetune'
-    bcic_2a: 'finetune'
+    # adftd: 'finetune'
+    # bcic_2a: 'finetune'
     # seed_vii: 'finetune'
+    epilepsy_pnes_20s: 'finetune'
 
 # MANAS model configuration
 model:
   # Pretrained weights
-  pretrained_path: '/share/data/MAE-Ablations/MODEL_LARGE_DATAD2_LOSSR1_AUGA0.pt'
+  pretrained_path: '/share/data/MAE-Ablations/MODEL_LARGE_DATAD1_LOSSR1_AUGA0.pt'
+  mae_type: 'default'
 
   # Architecture parameters
   patch_seconds: 1.0
@@ -109,11 +111,10 @@ logging:
   tags:
     - "manas"
     - "separated"
-    - "full_ft"
-    - "attention_pool"
-    - "verified"
-    - "MODEL_LARGE_DATAD2_LOSSR1_AUGA0.pt"
-    - "modeltime"
+    - "lp"
+    - "flatten_mlp"
+    - "verified_new_train_setting"
+    - "MODEL_LARGE_DATAD1_LOSSR1_AUGA0"
 
   # Logging intervals
   log_step_interval: 1

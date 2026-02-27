@@ -70,7 +70,17 @@ class TsneVisArgs(VisArgs):
     max_iter: int = 1000
 
 
-def load_vis_conf_dict(config_path, vis_type: str) -> Union[TsneVisArgs, GradCamVisArgs, IntegratedGradientsVisArgs]:
+class HeadMlpVisArgs(VisArgs):
+    methods: list[str] = Field(default_factory=lambda: ['avg_pool', 'attention_pool', 'flatten_mlp'])
+    checkpoints: dict[str, str] = Field(default_factory=lambda: {})
+    num_batch: int = 100
+    max_hist_samples: int = 2048
+    save_attention_map: bool = True
+
+
+def load_vis_conf_dict(
+        config_path, vis_type: str
+) -> Union[TsneVisArgs, GradCamVisArgs, IntegratedGradientsVisArgs, HeadMlpVisArgs]:
     file_cfg = OmegaConf.load(config_path)
     # Backward-compatible field naming
     if vis_type == 'grad_cam':
@@ -82,6 +92,8 @@ def load_vis_conf_dict(config_path, vis_type: str) -> Union[TsneVisArgs, GradCam
         config_class = GradCamVisArgs
     elif vis_type == 'integrated_gradients':
         config_class = IntegratedGradientsVisArgs
+    elif vis_type == 'head_mlp':
+        config_class = HeadMlpVisArgs
 
     else:
         raise ValueError(f'Unknown vis_type: {vis_type}')

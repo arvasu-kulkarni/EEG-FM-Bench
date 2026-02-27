@@ -26,3 +26,12 @@ wget-log
 *.txt
 !requirements_loc.txt
 run.sh
+/home/neurodx/arvasu/EEG-FM-Bench/ds004504
+plot/attention_vs_ig_hypothesis.py
+plot/configs/example/head_mlp_config.yaml
+*.npy
+*.png
+plot/output/attention_vs_ig/260226195410/run_config.json
+plot/output/attention_vs_ig/260226195410/summary.json
+plot/output/head_mlp/260226183222/head_mlp_vis_conf.yaml
+plot/output/head_mlp/260226183222/bcic_2a/head_mlp/summary.json

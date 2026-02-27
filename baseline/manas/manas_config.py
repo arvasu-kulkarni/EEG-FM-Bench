@@ -17,6 +17,7 @@ class ManasDataArgs(BaseDataArgs):
 
 class ManasModelArgs(BaseModelArgs):
     pretrained_path: Optional[str] = None
+    mae_type: Literal["default", "mahir"] = "default"
 
     patch_seconds: float = 1.0
     overlap_seconds: float = 0.1

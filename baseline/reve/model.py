@@ -56,21 +56,39 @@ class FeedForward(nn.Module):
 
 
 class ClassicalAttention(nn.Module):
-    def __init__(self, heads: int, use_sdpa: bool = True):
+    def __init__(self, heads: int, use_sdpa: bool = True, sdpa_backend: str = "auto"):
         super().__init__()
         self.use_sdpa = use_sdpa
         self.heads = heads
+        self.sdpa_backend = sdpa_backend
+        self.sdpa_backends = self._resolve_sdpa_backends(sdpa_backend)
         if self.use_sdpa:
             assert version.parse(torch.__version__) >= version.parse("2.2.0"), (
                 "in order to use sdpa, you must be using pytorch 2.2 or above"
             )
 
+    @staticmethod
+    def _resolve_sdpa_backends(sdpa_backend: str) -> list[SDPBackend]:
+        if sdpa_backend == "auto":
+            return [SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]
+        if sdpa_backend == "flash":
+            return [SDPBackend.FLASH_ATTENTION]
+        if sdpa_backend == "efficient":
+            return [SDPBackend.EFFICIENT_ATTENTION]
+        if sdpa_backend == "math":
+            return [SDPBackend.MATH]
+        raise ValueError(
+            f"Unknown sdpa_backend='{sdpa_backend}'. "
+            f"Expected one of: auto, flash, efficient, math."
+        )
+
     def forward(self, qkv: torch.Tensor) -> torch.Tensor:
         q, k, v = qkv.chunk(3, dim=-1)
         q, k, v = (rearrange(t, "b n (h d) -> b h n d", h=self.heads) for t in (q, k, v))
+        q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
 
         if self.use_sdpa:  # SDPA Implementation
-            with sdpa_kernel([SDPBackend.FLASH_ATTENTION, SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
+            with sdpa_kernel(self.sdpa_backends):
                 out = F.scaled_dot_product_attention(q, k, v)
         else:  # Naive Implementation
             _, _, scale = q.shape[-2], q.device, q.shape[-1] ** -0.5
@@ -87,7 +105,14 @@ class Attention(nn.Module):
     Common API for both classical and flash attention
     """
 
-    def __init__(self, dim: int, heads: int = 8, head_dim: int = 64, use_flash: bool = True):
+    def __init__(
+        self,
+        dim: int,
+        heads: int = 8,
+        head_dim: int = 64,
+        use_flash: bool = True,
+        sdpa_backend: str = "auto",
+    ):
         super().__init__()
         inner_dim = head_dim * heads
         self.heads = heads
@@ -97,7 +122,7 @@ class Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, dim, bias=False)
 
         self.use_flash = use_flash
-        self.attend = ClassicalAttention(self.heads, use_sdpa=True)
+        self.attend = ClassicalAttention(self.heads, use_sdpa=True, sdpa_backend=sdpa_backend)
 
     def forward(self, x):
         x = self.norm(x)
@@ -112,7 +137,7 @@ class Attention(nn.Module):
 
 
 class TransformerBackbone(nn.Module):
-    def __init__(self, dim, depth, heads, head_dim, mlp_dim, geglu):
+    def __init__(self, dim, depth, heads, head_dim, mlp_dim, geglu, sdpa_backend: str = "auto"):
         super().__init__()
         self.dim: int = dim
         self.layers = nn.ModuleList([])
@@ -120,7 +145,13 @@ class TransformerBackbone(nn.Module):
             self.layers.append(
                 nn.ModuleList(
                     [
-                        Attention(self.dim, heads=heads, head_dim=head_dim, use_flash=False),
+                        Attention(
+                            self.dim,
+                            heads=heads,
+                            head_dim=head_dim,
+                            use_flash=False,
+                            sdpa_backend=sdpa_backend,
+                        ),
                         FeedForward(self.dim, mlp_dim, geglu),
                     ]
                 )
@@ -280,6 +311,7 @@ class Reve(nn.Module):
             head_dim=cfg.head_dim,
             mlp_dim=int(cfg.embed_dim * cfg.mlp_dim_ratio),
             geglu=cfg.use_geglu,
+            sdpa_backend=cfg.sdpa_backend,
         )
 
         self.to_patch_embedding = patch_embedding(self.embed_dim, self.patch_size)
@@ -344,4 +376,3 @@ class Reve(nn.Module):
         attention_weights = torch.softmax(attention_scores, dim=-1)  # (B, 1, C*S)
         out = torch.matmul(attention_weights, x).squeeze(1)  # (B, E)
         return out
-
