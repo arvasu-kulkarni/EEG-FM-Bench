@@ -9,6 +9,7 @@ from torch import nn
 
 from baseline.manas.manas_config import ManasModelArgs
 from baseline.manas.manasfiles.model import MAE
+from baseline.manas.manasfiles.mahirmodel import MAE as MahirMAE
 
 
 class ManasEncoder(nn.Module):
@@ -16,7 +17,8 @@ class ManasEncoder(nn.Module):
 
     def __init__(self, cfg: ManasModelArgs, fs: int):
         super().__init__()
-        self.mae = MAE(
+        mae_cls = MahirMAE if cfg.mae_type == "mahir" else MAE
+        self.mae = mae_cls(
             fs=fs,
             patch_seconds=cfg.patch_seconds,
             overlap_seconds=cfg.overlap_seconds,
