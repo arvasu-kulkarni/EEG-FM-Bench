@@ -232,21 +232,40 @@ class AbstractTrainer(ABC):
             port=self.cfg.master_port
         )
 
+        launched_dist = (
+            world_size > 1
+            or (
+                "RANK" in os.environ
+                and "WORLD_SIZE" in os.environ
+                and "MASTER_ADDR" in os.environ
+                and "MASTER_PORT" in os.environ
+            )
+        )
+
+        if not launched_dist:
+            self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+            self.world_size = 1
+            self.rank = 0
+            self.local_rank = 0
+            return
+
         os.environ["RANK"] = str(rank)
         os.environ["WORLD_SIZE"] = str(world_size)
         os.environ["MASTER_ADDR"] = master_addr
         os.environ["MASTER_PORT"] = str(master_port)
         os.environ["LOCAL_RANK"] = str(local_rank)
 
-        assert 0 <= local_rank < 8
-        torch.cuda.set_device(local_rank)
-
-        torch.distributed.init_process_group(
-            backend="nccl",
-            device_id=torch.device(f"cuda:{local_rank}"),
-        )
-
-        self.device = torch.device(f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu")
+        if torch.cuda.is_available():
+            assert 0 <= local_rank < max(torch.cuda.device_count(), 1)
+            torch.cuda.set_device(local_rank)
+            torch.distributed.init_process_group(
+                backend="nccl",
+                device_id=torch.device(f"cuda:{local_rank}"),
+            )
+            self.device = torch.device(f"cuda:{local_rank}")
+        else:
+            torch.distributed.init_process_group(backend="gloo")
+            self.device = torch.device("cpu")
 
         self.world_size = world_size
         self.rank = rank
@@ -265,8 +284,12 @@ class AbstractTrainer(ABC):
     def maybe_wrap_ddp(self, model: nn.Module, find_unused_parameters: bool = True) -> nn.Module:
         """Wrap model with DDP if distributed is initialized, otherwise return as-is."""
         if torch.distributed.is_available() and torch.distributed.is_initialized():
+            if self.device is not None and self.device.type == "cuda":
+                return torch.nn.parallel.DistributedDataParallel(
+                    model, device_ids=[self.local_rank], find_unused_parameters=find_unused_parameters
+                )
             return torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[self.local_rank], find_unused_parameters=find_unused_parameters
+                model, find_unused_parameters=find_unused_parameters
             )
         return model
     
@@ -1224,6 +1247,7 @@ class AbstractTrainer(ABC):
                 self.model.encoder.eval()
 
         train_sampler.set_epoch(self.epoch)
+        is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
 
         batch: dict
         for step_in_epoch, batch in enumerate(train_loader):
@@ -1258,8 +1282,9 @@ class AbstractTrainer(ABC):
                 loss_tensor = loss.clone().detach()
                 acc_tensor = step_acc.clone().detach()
 
-                torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.AVG)
-                torch.distributed.all_reduce(acc_tensor, op=torch.distributed.ReduceOp.AVG)
+                if is_dist:
+                    torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.AVG)
+                    torch.distributed.all_reduce(acc_tensor, op=torch.distributed.ReduceOp.AVG)
 
                 if get_is_master():
                     log_data = {
@@ -1504,7 +1529,9 @@ class AbstractTrainer(ABC):
 
     def run_unified_training(self):
         """Original unified training loop for multitask training."""
-        torch.distributed.barrier()
+        is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if is_dist:
+            torch.distributed.barrier()
 
         repetition_results: Dict[str, List[Dict[str, Any]]] = {ds_name: [] for ds_name in self.ds_conf.keys()}
         for rep_idx in range(self.num_repetitions):
@@ -1540,7 +1567,8 @@ class AbstractTrainer(ABC):
             for epoch in range(self.cfg.training.max_epochs):
                 self.epoch = epoch
 
-                torch.distributed.barrier()
+                if is_dist:
+                    torch.distributed.barrier()
 
                 self.train_epoch(train_loader, train_sampler)
 
@@ -1558,7 +1586,9 @@ class AbstractTrainer(ABC):
 
     def run_separate_training(self):
         """Main training loop for separate models pattern - train one model per dataset."""
-        torch.distributed.barrier()
+        is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if is_dist:
+            torch.distributed.barrier()
 
         logger.info(f"Starting separate models training for {self.num_ds} datasets")
         repetition_results: Dict[str, List[Dict[str, Any]]] = {ds_name: [] for ds_name in self.ds_conf.keys()}
@@ -1610,7 +1640,8 @@ class AbstractTrainer(ABC):
                 for epoch in range(self.cfg.training.max_epochs):
                     self.epoch = epoch
 
-                    torch.distributed.barrier()
+                    if is_dist:
+                        torch.distributed.barrier()
 
                     self.train_epoch(train_loader, train_sampler)
 
