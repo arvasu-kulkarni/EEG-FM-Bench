@@ -2,7 +2,7 @@
 LABRAM Configuration that inherits from AbstractConfig.
 """
 
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Literal
 from pydantic import Field
 
 from baseline.abstract.config import AbstractConfig, BaseDataArgs, BaseModelArgs, BaseTrainingArgs, BaseLoggingArgs
@@ -74,6 +74,8 @@ class LabramTrainingArgs(BaseTrainingArgs):
     # Training options
     use_amp: bool = True
     freeze_encoder: bool = True
+    train_method: Optional[Literal["linear_probe", "partial_ft", "full_ft"]] = None
+    dual_stage: bool = False
     label_smoothing: float = 0.1
 
     # Model EMA

@@ -2,7 +2,7 @@
 CBraMod Configuration that inherits from AbstractConfig.
 """
 
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Literal
 from pydantic import Field
 
 from baseline.abstract.config import AbstractConfig, BaseDataArgs, BaseModelArgs, BaseTrainingArgs, BaseLoggingArgs
@@ -47,6 +47,8 @@ class CBraModTrainingArgs(BaseTrainingArgs):
 
     use_amp: bool = True
     freeze_encoder: bool = False
+    train_method: Optional[Literal["linear_probe", "partial_ft", "full_ft"]] = None
+    dual_stage: bool = False
 
 
 class CBraModLoggingArgs(BaseLoggingArgs):
