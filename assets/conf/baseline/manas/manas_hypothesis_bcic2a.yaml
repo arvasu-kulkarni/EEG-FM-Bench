@@ -1,0 +1,79 @@
+# MANAS hypothesis visualization config (single dataset, short run)
+seed: 42
+repetition: 1
+master_port: 51136
+multitask: false
+model_type: 'manas'
+fs: 200
+
+data:
+  batch_size: 8
+  num_workers: 0
+  datasets:
+    bcic_2a: 'finetune'
+
+model:
+  pretrained_path: '/share/data/MAE-Ablations/MODEL_LARGE_DATAD2_LOSSR1_AUGA0.pt'
+  mae_type: 'default'
+
+  patch_seconds: 1.0
+  overlap_seconds: 0.1
+  embed_dim: 512
+  encoder_depth: 12
+  encoder_heads: 8
+  decoder_depth: 4
+  decoder_heads: 8
+  mask_ratio: 0.55
+  aux_loss_weight: 0.1
+
+  classifier_head:
+    head_type: 'flatten_mlp'
+    hidden_dims: [128]
+    dropout: 0.3
+    attn_n_head: 4
+    attn_head_dim: 64
+    fusion_mode: 'dual'
+    fusion_n_head: 4
+    fusion_head_dim: 64
+    fusion_use_rope: true
+    fusion_rope_theta: 10000.0
+    fusion_max_seq_len: 1024
+
+training:
+  max_epochs: 1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lr_schedule: "onecycle"
+  max_lr: 2.0e-4
+  min_lr: 2.0e-5
+  warmup_epochs: 1
+  warmup_scale: 1e-1
+  encoder_lr_scale: 0.1
+  use_amp: false
+  train_method: "linear_probe"
+  dual_stage: false
+
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ["attn", "ffn.0", "ffn.2"]
+    lora_exclude_modules: null
+    lora_target_type: 'full'
+    lora_scope: 'full'
+    lora_lr_scale: 1.0
+
+logging:
+  experiment_name: "manas_hypothesis_bcic2a"
+  run_dir: "assets/run"
+  use_cloud: false
+  cloud_backend: "wandb"
+  project: "manas"
+  offline: true
+  tags:
+    - "manas"
+    - "bcic_2a"
+    - "hypothesis"
+  log_step_interval: 20
+  ckpt_interval: 1

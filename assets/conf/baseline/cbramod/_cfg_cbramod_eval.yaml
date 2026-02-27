@@ -1,0 +1,104 @@
+# CBraMod Separate (Single-Task) Training/Evaluation Configuration
+# Trains one model per dataset because multitask=false.
+
+# Training pattern flags
+seed: 42
+master_port: 51106
+multitask: false
+model_type: 'cbramod'
+fs: 200
+
+# Data configuration
+data:
+  batch_size: 32
+  num_workers: 2
+  datasets:
+    motor_mv_img: 'finetune'
+    workload: 'finetune'
+    hmc: 'finetune'
+    siena_scalp: 'finetune'
+    adftd: 'finetune'
+    bcic_2a: 'finetune'
+
+# CBraMod model configuration
+model:
+  # Optional pretrained state dict for encoder
+  pretrained_path: "/home/neurodx/mahir/EEG-Bench/CBraMod/pretrained_weights/pretrained_weights.pth"
+
+  # Classifier head configuration
+  classifier_head:
+    head_type: 'flatten_mlp'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
+    hidden_dims: [128]
+    dropout: 0.3
+    attn_n_head: 4
+    attn_head_dim: 64
+    fusion_mode: 'dual'
+    fusion_n_head: 4
+    fusion_head_dim: 64
+    fusion_use_rope: true
+    fusion_rope_theta: 10000.0
+    fusion_max_seq_len: 1024
+
+  # Architecture parameters
+  in_dim: 200
+  out_dim: 200
+  d_model: 200
+  dim_ffn: 800
+  n_layer: 12
+  n_head: 8
+  dropout_rate: 0.1
+
+  # Visualization hooks
+  grad_cam: false
+  t_sne: false
+
+# Training configuration
+training:
+  max_epochs: 50
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+  # Learning rate schedule
+  lr_schedule: 'cosine'
+  max_lr: 1.0e-4
+  # Full fine-tuning: train encoder + classifier at the same learning rate.
+  encoder_lr_scale: 1.0
+  warmup_epochs: 5
+  warmup_scale: 1.0e-2
+  pct_start: 0.2
+  min_lr: 1.0e-6
+
+  # Training options
+  use_amp: true
+  train_method: "full_ft"  # Options: linear_probe, partial_ft, full_ft
+  dual_stage: false             # If true: first N/2 epochs linear_probe, then train_method
+
+  # LoRA configuration
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ['default']
+    lora_exclude_modules: null
+    lora_target_type: 'default'
+    lora_scope: 'transformer'
+    lora_lr_scale: 1.0
+
+# Logging configuration
+logging:
+  experiment_name: 'cbramod'
+  run_dir: 'runs/cbramod_full/'
+
+  # Disable cloud logging by default for local benchmark runs
+  use_cloud: false
+  cloud_backend: 'wandb'
+  project: 'cbramod'
+  entity: null
+  api_key: null
+  offline: false
+
+  tags: ['cbramod', 'separate', 'full_finetune', 'eval']
+
+  log_step_interval: 1
+  ckpt_interval: 5

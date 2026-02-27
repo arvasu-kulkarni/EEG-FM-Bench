@@ -1,0 +1,99 @@
+# LaBraM Separate (Single-Task) config for epilepsy vs PNES (mimicker)
+
+seed: 42
+master_port: 51115
+multitask: false
+model_type: 'labram'
+fs: 200
+
+data:
+  batch_size: 32
+  num_workers: 4
+  datasets:
+    epilepsy_pnes_20s: 'finetune'
+
+model:
+  pretrained_path: "/home/neurodx/mahir/EEG-Bench/eeg_bench/models/bci/LaBraM/labram-base.pth"
+
+  classifier_head:
+    head_type: 'flatten_mlp'
+    hidden_dims: [128]
+    dropout: 0.3
+    attn_n_head: 4
+    attn_head_dim: 64
+    fusion_mode: 'dual'
+    fusion_n_head: 4
+    fusion_head_dim: 64
+    fusion_use_rope: true
+    fusion_rope_theta: 10000.0
+    fusion_max_seq_len: 1024
+
+  eeg_size: 2000
+  patch_size: 200
+  in_chans: 1
+  out_chans: 8
+  embed_dim: 200
+  depth: 12
+  num_heads: 10
+  mlp_ratio: 4.0
+
+  dropout_rate: 0.1
+  attn_dropout_rate: 0.1
+  drop_path_rate: 0.1
+  init_values: 0.1
+  init_scale: 0.001
+  layer_scale_init_value: 0.1
+  qkv_bias: false
+
+  use_abs_pos_emb: true
+  use_rel_pos_bias: false
+  use_shared_rel_pos_bias: false
+  use_mean_pooling: true
+
+  grad_cam: false
+  t_sne: false
+
+training:
+  max_epochs: 30
+  weight_decay: 0.05
+  max_grad_norm: 3.0
+
+  lr_schedule: 'cosine'
+  max_lr: 8.0e-4
+  encoder_lr_scale: 0.1
+  warmup_epochs: 5
+  warmup_scale: 1.0e-2
+  pct_start: 0.2
+  min_lr: 8.0e-6
+
+  use_amp: true
+  train_method: "full_ft"
+  dual_stage: false
+  label_smoothing: 0.1
+
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ['default']
+    lora_exclude_modules: null
+    lora_target_type: 'default'
+    lora_scope: 'transformer'
+    lora_lr_scale: 1.0
+
+logging:
+  experiment_name: 'labram_epilepsy_pnes_20s'
+  run_dir: 'runs/labram_epilepsy_pnes_20s'
+
+  use_cloud: false
+  cloud_backend: 'wandb'
+  project: 'labram'
+  entity: null
+  api_key: null
+  offline: false
+
+  tags: ['labram', 'epilepsy', 'pnes', 'mimicker', '20s']
+
+  log_step_interval: 1
+  ckpt_interval: 5
