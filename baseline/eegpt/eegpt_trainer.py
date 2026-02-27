@@ -117,10 +117,21 @@ class EegptTrainer(AbstractTrainer):
         # Build ds_shape_info for FLATTEN_MLP head type
         # For EEGPT, shape is [T, 1, embed_dim * embed_num] where T = seq_len
         ds_shape_info = {}
+        patch_size = self.cfg.model.patch_size
         patch_stride = self.cfg.model.patch_stride
         for ds_name, info in self.ds_info.items():
             for montage_key, (n_timepoints, n_channels) in info['shape_info'].items():
-                seq_len = n_timepoints // patch_stride
+                # Match PatchEmbed Conv2d tokenization exactly:
+                # N = floor((T - patch_size) / stride) + 1
+                if patch_stride is None:
+                    seq_len = n_timepoints // patch_size
+                else:
+                    if n_timepoints < patch_size:
+                        raise ValueError(
+                            f"Dataset time window too short for EEGPT patching: "
+                            f"montage={montage_key}, timepoints={n_timepoints}, patch_size={patch_size}"
+                        )
+                    seq_len = (n_timepoints - patch_size) // patch_stride + 1
                 ds_shape_info[montage_key] = (seq_len, self.cfg.model.embed_num, self.cfg.model.embed_dim)
 
         self.classifier = MultiHeadClassifier(
@@ -169,6 +180,13 @@ class EegptTrainer(AbstractTrainer):
 
         pretrain_ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
+        if 'state_dict' not in pretrain_ckpt:
+            logger.warning(
+                f"Checkpoint at {checkpoint_path} does not contain 'state_dict'. "
+                f"Top-level keys: {list(pretrain_ckpt.keys())[:10]}"
+            )
+            return
+
         # Extract encoder weights
         target_encoder_state = {}
         for k, v in pretrain_ckpt['state_dict'].items():
@@ -183,7 +201,10 @@ class EegptTrainer(AbstractTrainer):
             if unexpected_keys:
                 logger.warning(f"Unexpected keys in pretrained weights: {unexpected_keys}")
 
-            logger.info("Pretrained weights loaded successfully")
+            logger.info(
+                "Pretrained weights loaded successfully "
+                f"({len(target_encoder_state)} encoder tensors matched by prefix)"
+            )
         else:
             logger.warning("No encoder weights found in checkpoint or encoder not initialized")
 
