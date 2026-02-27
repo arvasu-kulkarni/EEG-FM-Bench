@@ -4,7 +4,7 @@
 # Training pattern flags
 seed: 42
 master_port: 51102
-multitask: true
+multitask: false
 model_type: 'csbrain'
 fs: 200
 
