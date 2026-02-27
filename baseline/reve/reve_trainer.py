@@ -246,6 +246,9 @@ class ReveTrainer(AbstractTrainer):
             betas=(self.cfg.training.adam_beta_1, self.cfg.training.adam_beta_2),
             lr=self.cfg.training.max_lr,
             eps=self.cfg.training.eps,
+            # Triton kernels are unstable on some driver/GPU combinations.
+            # Keep StableAdamW math/foreach path as a safer default.
+            triton=False,
         )
 
         scaler = torch.amp.GradScaler(enabled=self.cfg.training.use_amp)
@@ -571,4 +574,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
