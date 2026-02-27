@@ -1,16 +1,16 @@
-fs: 200
+fs: 256
 num_preproc_arrow_writers: 60
 num_preproc_mid_workers: 48
 pretrain_datasets: []
 finetune_datasets:
-  # bcic_2a: 'finetune'
+  bcic_2a: 'finetune'
   # seed: 'finetune'
-  # motor_mv_img: 'finetune'
-  # workload: 'finetune'
+  motor_mv_img: 'finetune'
+  workload: 'finetune'
   # tuev: 'finetune'
   # tuab: 'finetune'
-  # hmc: 'finetune'
-  # siena_scalp: 'finetune'
+  hmc: 'finetune'
+  siena_scalp: 'finetune'
   # tusl: 'finetune'
   # mimul_11: 'finetune'
   # things_eeg_2: 'finetune'

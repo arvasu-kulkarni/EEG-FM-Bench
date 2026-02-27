@@ -6,13 +6,13 @@ PLATFORM = os.getenv('EEGFM_PLATFORM', 'local')
 
 PROJECT_ROOT = os.getenv('EEGFM_PROJECT_ROOT', os.getcwd())
 ASSETS_ROOT = os.path.join(PROJECT_ROOT, 'assets')
-RUN_ROOT = '/share/data/eegfmbench/run' 
+RUN_ROOT = '/share/temp/eegfmbench_copy/run' 
 LOG_ROOT = os.path.join(RUN_ROOT, 'log')
 CONF_ROOT = os.getenv('EEGFM_CONF_ROOT', os.path.join(ASSETS_ROOT, 'conf'))
 
 DATABASE_RAW_ROOT = '/share/data/eegfmbench/raw/'
-DATABASE_PROC_ROOT = '/share/data/eegfmbench/proc/'
-DATABASE_CACHE_ROOT = '/share/data/eegfmbench/cache'
+DATABASE_PROC_ROOT = '/share/temp/eegfmbench_copy/proc/'
+DATABASE_CACHE_ROOT = '/share/temp/eegfmbench/cache'
 
 
 def get_conf_file_path(path):

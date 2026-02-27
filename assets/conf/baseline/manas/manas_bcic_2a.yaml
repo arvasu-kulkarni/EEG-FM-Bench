@@ -12,7 +12,7 @@ fs: 200
 # Data configuration
 data:
   batch_size: 32
-  num_workers: 16
+  num_workers: 2
   datasets:
     # seed: 'finetune'
     motor_mv_img: 'finetune'
@@ -32,7 +32,7 @@ data:
 # MANAS model configuration
 model:
   # Pretrained weights
-  pretrained_path: '/share/data/MAE-Ablations/MODEL_LARGE_DATAD2_LOSSR2_AUGA1.pt'
+  pretrained_path: '/share/data/MAE-Ablations/MODEL_LARGE_DATAD2_LOSSR1_AUGA0.pt'
 
   # Architecture parameters
   patch_seconds: 1.0
@@ -47,7 +47,7 @@ model:
 
   # Classifier head configuration
   classifier_head:
-    head_type: 'flatten_mlp'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
+    head_type: 'avg_pool'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
 
     # Common parameters
     hidden_dims: [128]
@@ -81,7 +81,7 @@ training:
 
   # Training options
   use_amp: true
-  train_method: "linear_probe"  # Options: linear_probe, partial_ft, full_ft
+  train_method: "full_ft"  # Options: linear_probe, partial_ft, full_ft
   dual_stage: false             # If true: first N/2 epochs linear_probe, then train_method
 
   # LoRA configuration
@@ -99,7 +99,7 @@ training:
 # Logging configuration
 logging:
   experiment_name: "manas"
-  run_dir: "/share/data/eegfmbench/run"
+  run_dir: "/share/temp/eegfmbench_copy/run"
 
   # Cloud logging
   use_cloud: true
@@ -109,11 +109,11 @@ logging:
   tags:
     - "manas"
     - "separated"
-    - "frozen"
-    - "mlp-head"
+    - "full_ft"
+    - "attention_pool"
     - "verified"
-    - "MODEL_LARGE_DATAD2_LOSSR2_AUGA1.pt"
-    - "modeltime - 25/02-11:49"
+    - "MODEL_LARGE_DATAD2_LOSSR1_AUGA0.pt"
+    - "modeltime"
 
   # Logging intervals
   log_step_interval: 1
