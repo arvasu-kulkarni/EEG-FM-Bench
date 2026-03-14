@@ -2,6 +2,9 @@
 Abstract trainer base class for baseline models.
 """
 import datetime
+import hashlib
+import importlib
+import json
 import os
 import logging
 from abc import ABC, abstractmethod
@@ -15,7 +18,6 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
-import wandb
 from sklearn.metrics import balanced_accuracy_score, roc_auc_score, average_precision_score, cohen_kappa_score, f1_score
 from torch import Tensor
 from torch.utils.data import DataLoader
@@ -53,6 +55,28 @@ METRIC_PRECISION_DICT = {
     "f1_weighted": "3f",
     "loss": "4f",
 }
+
+MASTER_RESULTS_COLUMNS = [
+    "dataset",
+    "split",
+    "score_metric",
+    "score",
+    "epoch",
+    "acc",
+    "balanced_acc",
+    "auroc",
+    "auc_pr",
+    "f1",
+    "loss",
+    "experiment_name",
+    "run_name",
+    "model_type",
+    "train_method",
+    "pretrained_path",
+    "config_hash",
+    "config_snapshot_path",
+    "updated_utc",
+]
 
 
 def format_console_log_dict(log_data: dict, prefix: str = 'train') -> str:
@@ -175,6 +199,174 @@ class AbstractTrainer(ABC):
             'eval': deepcopy(self.latest_epoch_metrics.get('eval', {}).get(ds_name, {})),
             'test': deepcopy(self.latest_epoch_metrics.get('test', {}).get(ds_name, {})),
         })
+
+    @staticmethod
+    def _safe_metric_value(metrics: Dict[str, float], key: str) -> float:
+        value = metrics.get(key, float("nan"))
+        if isinstance(value, (int, float)):
+            return float(value)
+        return float("nan")
+
+    @staticmethod
+    def _fmt_float(value: float) -> str:
+        if value != value:  # NaN check
+            return ""
+        return f"{value:.6f}"
+
+    def _run_results_dir(self) -> Path:
+        # Per-run location (inside run-specific log dir).
+        if self.log_dir:
+            return Path(self.log_dir) / "best_results"
+        run_dir = Path(self.cfg.logging.run_dir)
+        if not run_dir.is_absolute():
+            run_dir = (Path.cwd() / run_dir).resolve()
+        return run_dir / "best_results"
+
+    def _master_results_path(self) -> Path:
+        return self._run_results_dir() / "best_test_results.txt"
+
+    def _config_snapshot_path(self, config_hash: str) -> Path:
+        return self._run_results_dir() / f"config_{config_hash}.json"
+
+    def _persist_config_snapshot(self) -> tuple[str, str]:
+        config_obj = self.cfg.model_dump(mode="json")
+        config_json_min = json.dumps(config_obj, sort_keys=True, separators=(",", ":"))
+        config_hash = hashlib.sha1(config_json_min.encode("utf-8")).hexdigest()[:12]
+        cfg_path = self._config_snapshot_path(config_hash)
+        cfg_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if not cfg_path.exists():
+            tmp_path = cfg_path.with_suffix(cfg_path.suffix + ".tmp")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(config_obj, f, indent=2)
+            os.replace(tmp_path, cfg_path)
+
+        return config_hash, str(cfg_path)
+
+    def _select_master_score_metric(self, metrics: Dict[str, float]) -> tuple[str, float]:
+        env_metric = str(os.environ.get("EEGFMBENCH_MASTER_SCORE", "balanced_acc")).strip()
+        metric_order = [env_metric, "balanced_acc", "auroc", "f1", "acc"]
+        seen = set()
+        for metric_name in metric_order:
+            if metric_name in seen:
+                continue
+            seen.add(metric_name)
+            value = self._safe_metric_value(metrics, metric_name)
+            if value == value:  # not NaN
+                return metric_name, value
+        return "score", float("-inf")
+
+    def _load_master_best_records(
+            self,
+            path: Path,
+            key_fields: tuple[str, ...],
+    ) -> Dict[tuple[str, ...], Dict[str, str]]:
+        records: Dict[tuple[str, ...], Dict[str, str]] = {}
+        if not path.exists():
+            return records
+
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.rstrip("\n")
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("\t")
+                if parts == MASTER_RESULTS_COLUMNS:
+                    continue
+                if len(parts) != len(MASTER_RESULTS_COLUMNS):
+                    continue
+
+                row = dict(zip(MASTER_RESULTS_COLUMNS, parts))
+                key = tuple(row.get(field, "") for field in key_fields)
+                records[key] = row
+        return records
+
+    def _write_master_best_records(self, path: Path, records: Dict[tuple[str, ...], Dict[str, str]]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        updated_utc = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            f.write("# EEG-FM-Bench Run-Local Best Results\n")
+            f.write("# Updated live during this run only\n")
+            f.write("# One row per dataset for split=test\n")
+            f.write("# Score metric selection: $EEGFMBENCH_MASTER_SCORE (default=balanced_acc)\n")
+            f.write(f"# updated_utc: {updated_utc}\n")
+            f.write("\t".join(MASTER_RESULTS_COLUMNS) + "\n")
+
+            for key in sorted(records.keys()):
+                row = records[key]
+                f.write("\t".join(row.get(col, "") for col in MASTER_RESULTS_COLUMNS) + "\n")
+
+        os.replace(tmp_path, path)
+
+    def _update_master_best_results(self, split: str, current_split_metrics: Dict[str, Dict[str, float]]) -> None:
+        # Track best held-out metrics for this run only.
+        if split != "test" or not get_is_master():
+            return
+
+        experiment_name = str(getattr(self.cfg.logging, "experiment_name", ""))
+        if not experiment_name:
+            experiment_name = "unknown_experiment"
+        run_name = os.path.basename(self.log_dir.rstrip("/")) if self.log_dir else ""
+        train_method = str(getattr(self.cfg.training, "train_method", ""))
+        pretrained_path = str(getattr(self.cfg.model, "pretrained_path", ""))
+        updated_utc = datetime.datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        config_hash, config_snapshot_path = self._persist_config_snapshot()
+
+        records = self._load_master_best_records(self._master_results_path(), key_fields=("dataset", "split"))
+        any_update = False
+
+        for ds_name, metrics in current_split_metrics.items():
+            score_metric, score_value = self._select_master_score_metric(metrics)
+            if score_value == float("-inf"):
+                continue
+
+            epoch_value = int(metrics.get("epoch", self.epoch))
+            row = {
+                "dataset": ds_name,
+                "split": split,
+                "score_metric": score_metric,
+                "score": self._fmt_float(score_value),
+                "epoch": str(epoch_value),
+                "acc": self._fmt_float(self._safe_metric_value(metrics, "acc")),
+                "balanced_acc": self._fmt_float(self._safe_metric_value(metrics, "balanced_acc")),
+                "auroc": self._fmt_float(self._safe_metric_value(metrics, "auroc")),
+                "auc_pr": self._fmt_float(self._safe_metric_value(metrics, "auc_pr")),
+                "f1": self._fmt_float(self._safe_metric_value(metrics, "f1")),
+                "loss": self._fmt_float(self._safe_metric_value(metrics, "loss")),
+                "experiment_name": experiment_name,
+                "run_name": run_name,
+                "model_type": self.model_type,
+                "train_method": train_method,
+                "pretrained_path": pretrained_path,
+                "config_hash": config_hash,
+                "config_snapshot_path": config_snapshot_path,
+                "updated_utc": updated_utc,
+            }
+
+            key = (ds_name, split)
+            prev = records.get(key)
+            prev_score = float("-inf")
+            if prev is not None:
+                try:
+                    prev_score = float(prev.get("score", "-inf"))
+                except ValueError:
+                    prev_score = float("-inf")
+            if score_value <= prev_score:
+                continue
+
+            records[key] = row
+            any_update = True
+            logger.info(
+                f"[BestResults] Updated best {ds_name}/{split}: "
+                f"{score_metric}={score_value:.4f} at epoch={epoch_value}"
+            )
+
+        if any_update:
+            out_path = self._master_results_path()
+            self._write_master_best_records(out_path, records)
+            logger.info(f"[BestResults] Written: {out_path}")
 
     def _log_repetition_summary(self, repetition_results: Dict[str, List[Dict[str, Any]]], split: str = 'test'):
         if not get_is_master():
@@ -356,6 +548,8 @@ class AbstractTrainer(ABC):
         if get_is_master():
             # Initialize logging based on backend configuration
             backend = self.cfg.logging.cloud_backend.lower()
+            if backend in ['none', 'off', 'disabled']:
+                return
 
             if backend in ['wandb', 'both']:
                 self._init_wandb()
@@ -363,9 +557,25 @@ class AbstractTrainer(ABC):
             if backend in ['comet', 'both']:
                 self._init_comet()
 
+    @staticmethod
+    def _safe_import_wandb():
+        """Lazy-import wandb so runs with cloud disabled avoid importing it."""
+        if str(os.environ.get("WANDB_DISABLED", "")).lower() in {"1", "true", "yes", "on"}:
+            logger.info("WANDB_DISABLED is set; skipping wandb import")
+            return None
+        try:
+            return importlib.import_module("wandb")
+        except Exception as e:
+            logger.warning(f"Failed to import wandb: {e}")
+            return None
+
     def _init_wandb(self):
         """Initialize wandb logging with unified naming."""
         try:
+            wandb = self._safe_import_wandb()
+            if wandb is None:
+                return
+
             # Create wandb metrics list
             wandb_metrics = []
             if self.multitask:
@@ -461,8 +671,12 @@ class AbstractTrainer(ABC):
         """Finish cloud logging."""
         if not get_is_master():
             return
+        if not self.cfg.logging.use_cloud:
+            return
 
         backend = self.cfg.logging.cloud_backend.lower()
+        if backend in ['none', 'off', 'disabled']:
+            return
 
         if backend in ['wandb', 'both']:
             self._finish_wandb()
@@ -473,6 +687,9 @@ class AbstractTrainer(ABC):
     def _finish_wandb(self):
         """Finish wandb logging."""
         try:
+            wandb = self._safe_import_wandb()
+            if wandb is None:
+                return
             wandb.finish()
             logger.info("Wandb logging finished")
         except Exception as e:
@@ -503,7 +720,11 @@ class AbstractTrainer(ABC):
 
     def _log_to_cloud(self, log_data: dict):
         """Log data to configured cloud services."""
+        if not self.cfg.logging.use_cloud:
+            return
         backend = self.cfg.logging.cloud_backend.lower()
+        if backend in ['none', 'off', 'disabled']:
+            return
 
         if backend in ['wandb', 'both']:
             self._log_to_wandb(log_data)
@@ -514,6 +735,10 @@ class AbstractTrainer(ABC):
     def _log_to_wandb(self, log_data: dict):
         """Log data to wandb."""
         try:
+            wandb = self._safe_import_wandb()
+            if wandb is None:
+                return
+
             # Separate confusion matrix data from regular metrics
             wandb_data = {}
             cm_data = {}
@@ -1396,6 +1621,7 @@ class AbstractTrainer(ABC):
 
             if get_is_master():
                 self.latest_epoch_metrics[prefix] = current_split_metrics
+                self._update_master_best_results(prefix, current_split_metrics)
 
             if get_is_master() and self.cfg.logging.use_cloud:
                 log_cloud = self._create_ft_cloud_log_data(log_dict, prefix, overall_metrics)

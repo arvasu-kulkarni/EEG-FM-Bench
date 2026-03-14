@@ -1,0 +1,46 @@
+# MANAS eval config for NDX pretrained run: 20260227_093832
+# Technique: LP (Linear Probing)
+seed: 42
+repetition: 1
+master_port: 51115
+multitask: false
+model_type: 'manas'
+fs: 200
+
+data:
+  batch_size: 32
+  num_workers: 8
+  datasets:
+    adftd: 'finetune'        # ADFTD
+    bcic_2a: 'finetune'      # BCI-IV-2a
+    hmc: 'finetune'          # HMC
+    motor_mv_img: 'finetune' # PhysioNet MI
+    siena_scalp: 'finetune'  # Siena
+    workload: 'finetune'     # EEGMAT
+
+model:
+  pretrained_path: '/share/tmp/mishra/output/20260227_093832'
+  mae_type: 'ndx'
+  external_model_py: '/home/neurodx/adityaraymishra/ndx-pipeline/model.py'
+  ndx_run_config_path: '/share/tmp/mishra/output/20260227_093832/run_config.json'
+
+training:
+  max_epochs: 30
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lr_schedule: 'cosine'
+  max_lr: 2.0e-4
+  min_lr: 2.0e-5
+  warmup_epochs: 3
+  warmup_scale: 1.0e-1
+  encoder_lr_scale: 0.1
+  use_amp: true
+  train_method: 'linear_probe'
+  dual_stage: false
+
+logging:
+  experiment_name: 'manas_ndx_20260227_093832_multids_lp'
+  run_dir: 'eegfmbench_run'
+  use_cloud: false
+  cloud_backend: 'none'
+  tags: ['manas', 'ndx', '20260227_093832', 'multids', 'linear_probe', 'adftd', 'bcic_2a', 'hmc', 'motor_mv_img', 'siena_scalp', 'workload']

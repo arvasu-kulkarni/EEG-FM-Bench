@@ -17,7 +17,12 @@ class ManasDataArgs(BaseDataArgs):
 
 class ManasModelArgs(BaseModelArgs):
     pretrained_path: Optional[str] = None
-    mae_type: Literal["default", "mahir"] = "default"
+    pretrained_epoch: Optional[int] = None  # Load specific mae_epoch_<N>.pt; None = auto-pick latest
+    mae_type: Literal["default", "mahir", "ndx"] = "default"
+
+    # Used when mae_type='ndx'
+    external_model_py: Optional[str] = None
+    ndx_run_config_path: Optional[str] = None
 
     patch_seconds: float = 1.0
     overlap_seconds: float = 0.1
@@ -65,6 +70,11 @@ class ManasLoggingArgs(BaseLoggingArgs):
 class ManasConfig(AbstractConfig):
     model_type: str = "manas"
     fs: int = 200
+
+    # Sweep mode: flat directory layout + model-level aggregation
+    sweep_mode: bool = False
+    sweep_root: Optional[str] = None  # e.g. runs/<timestamp>/ for aggregated best_results.txt
+    save_checkpoints: bool = True  # Set False to skip saving model weights
 
     data: ManasDataArgs = Field(default_factory=ManasDataArgs)
     model: ManasModelArgs = Field(default_factory=ManasModelArgs)

@@ -1,0 +1,52 @@
+# MANAS NDX Sweep Template Config
+# Used by scripts/run_ndx_sweep.sh — CLI overrides fill in epoch, method, paths.
+seed: 42
+repetition: 1
+master_port: 51200
+multitask: false
+model_type: 'manas'
+fs: 200
+sweep_mode: true
+save_checkpoints: false
+# sweep_root: set by orchestrator
+
+data:
+  batch_size: 32
+  num_workers: 8
+  datasets:
+    adftd: 'finetune'        # ADFTD
+    bcic_2a: 'finetune'      # BCI-IV-2a
+    hmc: 'finetune'          # HMC
+    motor_mv_img: 'finetune' # PhysioNet MI
+    siena_scalp: 'finetune'  # Siena
+    workload: 'finetune'     # EEGMAT
+
+model:
+  # pretrained_path: set by orchestrator
+  # pretrained_epoch: set by orchestrator
+  mae_type: 'ndx'
+  # external_model_py: set by orchestrator
+  # ndx_run_config_path: auto-resolved from pretrained_path
+
+training:
+  max_epochs: 30
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lr_schedule: 'cosine'
+  max_lr: 2.0e-4
+  min_lr: 2.0e-5
+  warmup_epochs: 3
+  warmup_scale: 1.0e-1
+  encoder_lr_scale: 0.1
+  use_amp: true
+  # train_method: set by orchestrator (linear_probe or full_ft)
+  dual_stage: false
+
+logging:
+  # experiment_name: set by orchestrator
+  # run_dir: set by orchestrator
+  use_cloud: true
+  cloud_backend: 'wandb'
+  entity: 'neurodx-labs-neurodx'
+  project: 'downstream-mishra'
+  tags: ['manas', 'ndx', 'sweep']

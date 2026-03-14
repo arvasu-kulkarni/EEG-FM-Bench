@@ -1,3 +1,5 @@
+import logging
+
 from baseline.abstract.factory import ModelRegistry
 from baseline.cbramod.cbramod_adapter import CBraModDataLoaderFactory
 from baseline.cbramod.cbramod_config import CBraModConfig
@@ -22,9 +24,17 @@ from baseline.biot.biot_trainer import BiotTrainer
 from baseline.mantis import MantisConfig, MantisDataLoaderFactory, MantisTrainer
 from baseline.moment import MomentConfig, MomentDataLoaderFactory, MomentTrainer
 from baseline.manas import ManasConfig, ManasDataLoaderFactory, ManasTrainer
-from baseline.reve.reve_adapter import ReveDataLoaderFactory
-from baseline.reve.reve_config import ReveConfig
-from baseline.reve.reve_trainer import ReveTrainer
+
+logger = logging.getLogger("baseline")
+
+try:
+    from baseline.reve.reve_adapter import ReveDataLoaderFactory
+    from baseline.reve.reve_config import ReveConfig
+    from baseline.reve.reve_trainer import ReveTrainer
+    _reve_available = True
+except ModuleNotFoundError as exc:
+    _reve_available = False
+    logger.warning(f"Skipping REVE registration due to missing optional dependency: {exc}")
 
 ModelRegistry.register_model(
     model_type='eegpt',
@@ -61,12 +71,13 @@ ModelRegistry.register_model(
     trainer_class=CBraModTrainer
 )
 
-ModelRegistry.register_model(
-    model_type='reve',
-    config_class=ReveConfig,
-    adapter_class=ReveDataLoaderFactory,
-    trainer_class=ReveTrainer
-)
+if _reve_available:
+    ModelRegistry.register_model(
+        model_type='reve',
+        config_class=ReveConfig,
+        adapter_class=ReveDataLoaderFactory,
+        trainer_class=ReveTrainer
+    )
 
 ModelRegistry.register_model(
     model_type='csbrain',
