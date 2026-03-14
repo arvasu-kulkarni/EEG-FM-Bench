@@ -4,6 +4,7 @@ MANAS encoder wrapper for EEG-FM-Bench.
 
 from __future__ import annotations
 
+import inspect
 import importlib.util
 import json
 import os
@@ -11,6 +12,7 @@ import sys
 from typing import Any
 
 import torch
+import yaml
 from torch import nn
 
 from baseline.manas.manas_config import ManasModelArgs
@@ -63,6 +65,59 @@ def _load_ndx_run_metadata(
     return {}, {}, None
 
 
+def _load_ndx_train_metadata(
+    pretrained_path: str | None,
+    train_config_path: str | None,
+    model_py_path: str | None,
+) -> tuple[dict[str, Any], str | None]:
+    candidates: list[str] = []
+
+    if train_config_path:
+        candidates.append(os.path.abspath(train_config_path))
+
+    run_dir = _resolve_run_dir(pretrained_path)
+    if run_dir:
+        candidates.extend(
+            [
+                os.path.join(run_dir, "trainconfig.yaml"),
+                os.path.join(run_dir, "config.yaml"),
+            ]
+        )
+
+    if model_py_path:
+        project_root = os.path.dirname(os.path.abspath(model_py_path))
+        candidates.extend(
+            [
+                os.path.join(project_root, "configs", "trainconfig.yaml"),
+                os.path.join(project_root, "trainconfig.yaml"),
+            ]
+        )
+
+    seen: set[str] = set()
+    for candidate in candidates:
+        resolved = os.path.abspath(candidate)
+        if resolved in seen or not os.path.isfile(resolved):
+            continue
+        seen.add(resolved)
+
+        with open(resolved, "r", encoding="utf-8") as f:
+            payload = yaml.safe_load(f) or {}
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Invalid train config payload at {resolved}: expected object")
+
+        model_cfg = payload.get("model_config", {})
+        if not isinstance(model_cfg, dict):
+            raise ValueError(f"Invalid train config model_config at {resolved}: expected object")
+
+        if "fs" not in model_cfg and payload.get("fs") is not None:
+            model_cfg = {**model_cfg, "fs": payload.get("fs")}
+
+        return model_cfg, resolved
+
+    return {}, None
+
+
 def _load_external_mae_class(model_py_path: str):
     resolved = os.path.abspath(model_py_path)
     if not os.path.isfile(resolved):
@@ -88,6 +143,41 @@ def _load_external_mae_class(model_py_path: str):
     return mae_cls
 
 
+def _build_ndx_mae_kwargs(
+    mae_cls: type,
+    cfg: ManasModelArgs,
+    fs: int,
+    model_cfg: dict[str, Any],
+    ablation_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    mae_init_params = inspect.signature(mae_cls.__init__).parameters
+    mae_param_names = {
+        name
+        for name, param in mae_init_params.items()
+        if name != "self"
+        and param.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    }
+
+    base_kwargs: dict[str, Any] = {
+        "fs": fs,
+        "patch_seconds": cfg.patch_seconds,
+        "overlap_seconds": cfg.overlap_seconds,
+        "embed_dim": cfg.embed_dim,
+        "encoder_depth": cfg.encoder_depth,
+        "encoder_heads": cfg.encoder_heads,
+        "decoder_depth": cfg.decoder_depth,
+        "decoder_heads": cfg.decoder_heads,
+        "mask_ratio": cfg.mask_ratio,
+        "aux_loss_weight": cfg.aux_loss_weight,
+    }
+
+    merged = dict(base_kwargs)
+    merged.update(model_cfg)
+    merged.update(ablation_cfg)
+
+    return {k: v for k, v in merged.items() if k in mae_param_names and v is not None}
+
+
 class ManasEncoder(nn.Module):
     """Encoder that exposes MAE features in (B, C, T, E) format."""
 
@@ -106,44 +196,33 @@ class ManasEncoder(nn.Module):
                 cfg.pretrained_path,
                 cfg.ndx_run_config_path,
             )
+            train_cfg, train_cfg_used = _load_ndx_train_metadata(
+                cfg.pretrained_path,
+                cfg.ndx_train_config_path,
+                cfg.external_model_py,
+            )
 
             mae_cls = _load_external_mae_class(cfg.external_model_py)
 
-            fs_eff = int(run_cfg.get("fs", fs))
-            patch_seconds = float(run_cfg.get("patch_seconds", cfg.patch_seconds))
-            overlap_seconds = float(run_cfg.get("overlap_seconds", cfg.overlap_seconds))
-            embed_dim = int(run_cfg.get("embed_dim", cfg.embed_dim))
-            encoder_depth = int(run_cfg.get("encoder_depth", cfg.encoder_depth))
-            encoder_heads = int(run_cfg.get("encoder_heads", cfg.encoder_heads))
-            decoder_depth = int(run_cfg.get("decoder_depth", cfg.decoder_depth))
-            decoder_heads = int(run_cfg.get("decoder_heads", cfg.decoder_heads))
-            mask_ratio = float(run_cfg.get("mask_ratio", cfg.mask_ratio))
-            aux_loss_weight = float(ablation_cfg.get("aux_loss_weight", cfg.aux_loss_weight))
+            model_cfg = dict(train_cfg)
+            model_cfg.update(run_cfg)
+            fs_eff = int(model_cfg.get("fs", fs))
+            mae_kwargs = _build_ndx_mae_kwargs(mae_cls, cfg, fs_eff, model_cfg, ablation_cfg)
 
-            self.mae = mae_cls(
-                fs=fs_eff,
-                patch_seconds=patch_seconds,
-                overlap_seconds=overlap_seconds,
-                embed_dim=embed_dim,
-                encoder_depth=encoder_depth,
-                encoder_heads=encoder_heads,
-                decoder_depth=decoder_depth,
-                decoder_heads=decoder_heads,
-                mask_ratio=mask_ratio,
-                aux_loss_weight=aux_loss_weight,
-                ablation_cfg=ablation_cfg,
-            )
+            self.mae = mae_cls(**mae_kwargs)
 
             self.runtime_meta = {
                 "run_cfg_used": run_cfg_used,
-                "fs": fs_eff,
-                "embed_dim": embed_dim,
-                "encoder_depth": encoder_depth,
-                "encoder_heads": encoder_heads,
-                "decoder_depth": decoder_depth,
-                "decoder_heads": decoder_heads,
-                "mask_ratio": mask_ratio,
-                "aux_loss_weight": aux_loss_weight,
+                "train_cfg_used": train_cfg_used,
+                "fs": int(mae_kwargs.get("fs", fs_eff)),
+                "embed_dim": int(mae_kwargs.get("embed_dim", cfg.embed_dim)),
+                "encoder_depth": int(mae_kwargs.get("encoder_depth", cfg.encoder_depth)),
+                "encoder_heads": int(mae_kwargs.get("encoder_heads", cfg.encoder_heads)),
+                "decoder_depth": int(mae_kwargs.get("decoder_depth", cfg.decoder_depth)),
+                "decoder_heads": int(mae_kwargs.get("decoder_heads", cfg.decoder_heads)),
+                "mask_ratio": float(mae_kwargs.get("mask_ratio", cfg.mask_ratio)),
+                "aux_loss_weight": float(mae_kwargs.get("aux_loss_weight", cfg.aux_loss_weight)),
+                "mae_kwargs": mae_kwargs,
             }
         else:
             mae_cls = MahirMAE if cfg.mae_type == "mahir" else MAE

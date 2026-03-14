@@ -3,7 +3,7 @@
 # run_ndx_sweep.sh — Sweep all pretrained epoch checkpoints × {FT, LP}
 #
 # Usage:
-#   ./scripts/run_ndx_sweep.sh <pretrained_dir> <external_model_py> [gpu_list]
+#   ./scripts/run_ndx_sweep.sh <pretrained_dir> <external_model_py> [gpu_list] [epoch_list] [train_config_yaml]
 #
 # Examples:
 #   ./scripts/run_ndx_sweep.sh /share/tmp/mishra/output/20260227_093832 \
@@ -11,6 +11,10 @@
 #
 #   ./scripts/run_ndx_sweep.sh /share/tmp/mishra/output/20260228_011414 \
 #       /home/neurodx/adityaraymishra/ndx-pipeline/model.py 0,1,2,3,4,5,6,7
+#
+#   ./scripts/run_ndx_sweep.sh /share/tmp/mishra/output/2026-03-13_20-25-46 \
+#       /home/neurodx/adityaraymishra/ndx-pipeline-neurodx/model.py \
+#       0,1,2,3,4,5,6,7 "" /home/neurodx/adityaraymishra/ndx-pipeline-neurodx/configs/trainconfig.yaml
 #
 # Output structure:
 #   runs/<timestamp>/
@@ -23,12 +27,20 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-
+# --------------- Python interpreter ---------------
+# Prefer the venv alongside this repo; fall back to whatever is on PATH.
+VENV_PYTHON="$(dirname "$ROOT_DIR")/.venv/bin/python"
+if [[ -x "$VENV_PYTHON" ]]; then
+    PYTHON="$VENV_PYTHON"
+else
+    PYTHON="$(command -v python3 || command -v python)"
+fi
 # --------------- Arguments ---------------
 PRETRAINED_DIR="${1:?Usage: $0 <pretrained_dir> <external_model_py> [gpu_list] [epoch_list]}"
 EXTERNAL_MODEL_PY="${2:?Usage: $0 <pretrained_dir> <external_model_py> [gpu_list] [epoch_list]}"
 GPU_LIST="${3:-0,1,2,3,4,5,6,7}"
 EPOCH_FILTER="${4:-}"  # Optional: comma-separated epochs e.g. "12,13,14,15,16,17,18"
+TRAIN_CONFIG_PATH="${5:-}"  # Optional: explicit ndx-pipeline-neurodx trainconfig.yaml
 
 CONF_FILE="baseline/manas/manas_ndx_sweep_template.yaml"
 
@@ -43,6 +55,7 @@ echo "  Pretrained dir : $PRETRAINED_DIR"
 echo "  External model : $EXTERNAL_MODEL_PY"
 echo "  GPUs           : $GPU_LIST"
 echo "  Epoch filter   : ${EPOCH_FILTER:-all}"
+echo "  Train config   : ${TRAIN_CONFIG_PATH:-auto}"
 echo "  Sweep root     : $SWEEP_ROOT"
 echo "======================================="
 
@@ -71,8 +84,8 @@ export TORCH_HOME="$RUNTIME_DIR/torch_home"
 export MPLCONFIGDIR="$RUNTIME_DIR/mpl"
 export MNE_DONTWRITE_HOME="true"
 
-# --------------- Discover epoch checkpoints ---------------
-EPOCH_FILES=( $(ls "$PRETRAINED_DIR"/mae_epoch_*.pt 2>/dev/null | sort -t_ -k3 -n) )
+# --------------- Discover epoch checkpoints (numerically sorted) ---------------
+EPOCH_FILES=( $(ls "$PRETRAINED_DIR"/mae_epoch_*.pt 2>/dev/null | sort -V) )
 if [[ ${#EPOCH_FILES[@]} -eq 0 ]]; then
     echo "ERROR: No mae_epoch_*.pt files found in $PRETRAINED_DIR"
     exit 1
@@ -156,13 +169,19 @@ while [[ $JOB_IDX -lt $TOTAL_JOBS ]]; do
 
         echo "  [GPU $GPU] epoch_${EP}/${METHOD} -> $RUN_DIR"
 
-        CUDA_VISIBLE_DEVICES="$GPU" python baseline_main.py \
+        EXTRA_ARGS=()
+        if [[ -n "$TRAIN_CONFIG_PATH" ]]; then
+            EXTRA_ARGS+=(model.ndx_train_config_path="$TRAIN_CONFIG_PATH")
+        fi
+
+        CUDA_VISIBLE_DEVICES="$GPU" "$PYTHON" baseline_main.py \
             conf_file="$CONF_FILE" \
             model_type=manas \
             model.pretrained_path="$PRETRAINED_DIR" \
             model.pretrained_epoch="$EP" \
             model.mae_type=ndx \
             model.external_model_py="$EXTERNAL_MODEL_PY" \
+            "${EXTRA_ARGS[@]}" \
             training.train_method="$TRAIN_METHOD" \
             logging.run_dir="$RUN_DIR" \
             logging.experiment_name="$EXPERIMENT_NAME" \
@@ -205,5 +224,5 @@ echo "========================================"
 # Run standalone aggregation as final pass (in case some live updates were missed)
 if [[ -f "$ROOT_DIR/scripts/aggregate_sweep.py" ]]; then
     echo "Running final aggregation..."
-    python "$ROOT_DIR/scripts/aggregate_sweep.py" "$SWEEP_ROOT"
+    "$PYTHON" "$ROOT_DIR/scripts/aggregate_sweep.py" "$SWEEP_ROOT"
 fi

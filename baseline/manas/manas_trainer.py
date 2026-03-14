@@ -9,6 +9,7 @@ import os
 import re
 from pathlib import Path
 from typing import Optional, Literal, Dict, Any, List
+from collections.abc import Iterable
 import torch
 from torch import nn
 from torch.utils.data import DataLoader
@@ -121,6 +122,14 @@ class ManasTrainer(AbstractTrainer):
                 epochs.append(int(match.group(1)))
         return sorted(epochs)
 
+    @staticmethod
+    def _strip_state_dict_prefix(state_dict: dict, prefixes: Iterable[str]) -> dict:
+        stripped = dict(state_dict)
+        for prefix in prefixes:
+            if stripped and all(k.startswith(prefix) for k in stripped.keys()):
+                stripped = {k[len(prefix):]: v for k, v in stripped.items()}
+        return stripped
+
     def setup_model(self):
         logger.info("Setting up MANAS model architecture...")
         cfg: ManasModelArgs = self.cfg.model
@@ -216,8 +225,24 @@ class ManasTrainer(AbstractTrainer):
                 f"expected dict-like state_dict, got {type(state_dict).__name__}"
             )
 
-        missing, unexpected = self.encoder.mae.load_state_dict(state_dict, strict=False)
-        if missing or unexpected:
+        candidate_state_dicts = [
+            state_dict,
+            self._strip_state_dict_prefix(state_dict, ("module.",)),
+            self._strip_state_dict_prefix(state_dict, ("mae.",)),
+            self._strip_state_dict_prefix(state_dict, ("module.", "mae.")),
+        ]
+        best_result: tuple[list[str], list[str]] | None = None
+
+        for candidate in candidate_state_dicts:
+            missing, unexpected = self.encoder.mae.load_state_dict(candidate, strict=False)
+            if not missing and not unexpected:
+                best_result = (missing, unexpected)
+                break
+            if best_result is None or (len(missing) + len(unexpected) < len(best_result[0]) + len(best_result[1])):
+                best_result = (missing, unexpected)
+
+        if best_result is None or best_result[0] or best_result[1]:
+            missing, unexpected = best_result if best_result is not None else ([], [])
             raise RuntimeError(
                 "MANAS checkpoint is incompatible with current encoder architecture. "
                 f"missing_keys={missing}, unexpected_keys={unexpected}"
@@ -535,7 +560,7 @@ class ManasTrainer(AbstractTrainer):
         import datetime
 
         # Group: dataset -> list of (pretrained_epoch, score, row)
-        ds_best: Dict[str, list[tuple[int, float, dict]]] = collections.defaultdict(list)
+        ds_best: Dict[str, List[tuple[int, float, dict]]] = collections.defaultdict(list)
         for r in records:
             ds_name = r.get('dataset', '')
             try:

@@ -23,6 +23,7 @@ class ManasModelArgs(BaseModelArgs):
     # Used when mae_type='ndx'
     external_model_py: Optional[str] = None
     ndx_run_config_path: Optional[str] = None
+    ndx_train_config_path: Optional[str] = None
 
     patch_seconds: float = 1.0
     overlap_seconds: float = 0.1
