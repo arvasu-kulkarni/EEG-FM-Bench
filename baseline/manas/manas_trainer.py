@@ -31,7 +31,7 @@ class ManasUnifiedModel(nn.Module):
         pos = batch['pos']
         montage = batch['montage'][0]
 
-        features = self.encoder(x, pos)
+        features = self.encoder(x, pos, montage=montage)
         features = features.permute(0, 2, 1, 3)
 
         if self.grad_cam:
@@ -51,6 +51,8 @@ class ManasTrainer(AbstractTrainer):
             num_workers=self.cfg.data.num_workers,
             seed=self.cfg.seed,
             target_fs=self.cfg.fs,
+            use_legacy_mne_positions=self.cfg.data.use_legacy_mne_positions,
+            positions_json_path=self.cfg.data.positions_json_path,
         )
 
         self.encoder: Optional[ManasEncoder] = None
@@ -91,7 +93,14 @@ class ManasTrainer(AbstractTrainer):
                         f"Dataset sample too short for MANAS patching: montage={montage_key}, timepoints={n_timepoints}, "
                         f"patch_size={patch_size}, overlap={overlap_size}"
                     )
-                ds_shape_info[montage_key] = (n_patches, n_channels, embed_dim)
+                n_channels_eff = self.encoder.effective_num_channels(n_channels, ds_name=ds_name)
+                ds_shape_info[montage_key] = (n_patches, n_channels_eff, embed_dim)
+                token_count = n_channels_eff * n_patches
+                pairwise_flag = self.encoder.uses_pairwise_for_dataset(ds_name)
+                logger.info(
+                    f"MANAS shape {montage_key}: patches={n_patches}, channels_eff={n_channels_eff}, "
+                    f"tokens={token_count}, pairwise={'on' if pairwise_flag else 'off'}"
+                )
 
         self.classifier = MultiHeadClassifier(
             embed_dim=embed_dim,
@@ -158,7 +167,44 @@ class ManasTrainer(AbstractTrainer):
                 f"expected dict-like state_dict, got {type(state_dict).__name__}"
             )
 
-        missing, unexpected = self.encoder.mae.load_state_dict(state_dict, strict=False)
+        # Compatibility:
+        # 1) Some checkpoints store MAE weights under `mae.*` key prefix.
+        # 2) Some checkpoints name attention projection weights as `attn.qkv_proj.*`
+        #    instead of torch MultiheadAttention's `attn.in_proj_*`.
+        remapped: dict[str, torch.Tensor] = {}
+        remapped_count = 0
+        stripped_prefix_count = 0
+        for key, value in state_dict.items():
+            new_key = key
+            if new_key.startswith("mae."):
+                new_key = new_key[len("mae."):]
+                stripped_prefix_count += 1
+
+            if new_key.endswith(".attn.qkv_proj.weight"):
+                new_key = new_key.replace(".attn.qkv_proj.weight", ".attn.in_proj_weight")
+                remapped_count += 1
+            elif new_key.endswith(".attn.qkv_proj.bias"):
+                new_key = new_key.replace(".attn.qkv_proj.bias", ".attn.in_proj_bias")
+                remapped_count += 1
+
+            if new_key in remapped:
+                raise RuntimeError(
+                    "Checkpoint key remap collision while loading MANAS weights: "
+                    f"{key} -> {new_key}"
+                )
+            remapped[new_key] = value
+        if remapped_count > 0:
+            logger.info(
+                "Applied MANAS checkpoint attention-key remap: "
+                f"{remapped_count} qkv_proj entries converted to in_proj."
+            )
+        if stripped_prefix_count > 0:
+            logger.info(
+                "Applied MANAS checkpoint prefix remap: "
+                f"stripped 'mae.' from {stripped_prefix_count} keys."
+            )
+
+        missing, unexpected = self.encoder.mae.load_state_dict(remapped, strict=False)
         if missing or unexpected:
             raise RuntimeError(
                 "MANAS checkpoint is incompatible with current encoder architecture. "

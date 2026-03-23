@@ -77,12 +77,17 @@ class TransformerEncoderDecoder(nn.Module):
         self.layers = nn.ModuleList([TransformerBlock(embed_dim, heads) for _ in range(depth)])
         self.final_norm = nn.LayerNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        intermediate = []
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_intermediate: bool = True,
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
+        intermediate = [] if return_intermediate else None
 
         for layer in self.layers:
             x, ffn_out = layer(x)
-            intermediate.append(ffn_out)
+            if return_intermediate:
+                intermediate.append(ffn_out)
 
         return self.final_norm(x), intermediate
 
@@ -128,7 +133,7 @@ class MAEDecoder(nn.Module):
         # --- Step D: Decode ---
         # Pass through the Transformer
         # We ignore the intermediate outputs (the second return value) for now
-        x_decoded, _ = self.decoder(x_full)
+        x_decoded, _ = self.decoder(x_full, return_intermediate=False)
 
         # --- Step E: Predict ---
         # (Batch, N_Total, 512) -> (Batch, N_Total, 200)

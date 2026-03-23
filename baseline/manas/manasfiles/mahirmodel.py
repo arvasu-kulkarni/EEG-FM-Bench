@@ -52,16 +52,23 @@ class PatchEmbed(nn.Module):
 
 
 class PosEnc(nn.Module):
-    def __init__(self, n_freqs: int = 4, embed_dim: int = 512):
+    def __init__(self, n_freqs: int = 4, embed_dim: int = 512, n_coords: int = 4):
         super().__init__()
+        if n_coords <= 0:
+            raise ValueError("n_coords must be > 0")
+        self.n_coords = int(n_coords)
 
         freqs = torch.linspace(1.0, 10.0, n_freqs)
-        self.register_buffer("freq_matrix", torch.cartesian_prod(freqs, freqs, freqs, freqs).transpose(1, 0))
+        self.register_buffer("freq_matrix", torch.cartesian_prod(*([freqs] * self.n_coords)).transpose(1, 0))
 
-        fourier_features_dim = 2 * (n_freqs**4)
+        fourier_features_dim = 2 * (n_freqs**self.n_coords)
 
         self.fourier_linear = nn.Linear(fourier_features_dim, embed_dim, bias=False)
-        self.learned_linear = nn.Sequential(nn.Linear(4, 2 * embed_dim, bias=False), GEGLU(), RMSNorm(embed_dim))
+        self.learned_linear = nn.Sequential(
+            nn.Linear(self.n_coords, 2 * embed_dim, bias=False),
+            GEGLU(),
+            RMSNorm(embed_dim),
+        )
 
         self.final_norm = RMSNorm(embed_dim)
 
@@ -109,12 +116,17 @@ class TransformerEncoderDecoder(nn.Module):
         self.layers = nn.ModuleList([TransformerBlock(embed_dim, heads) for _ in range(depth)])
         self.final_norm = RMSNorm(embed_dim)
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        intermediate = []
+    def forward(
+        self,
+        x: torch.Tensor,
+        return_intermediate: bool = True,
+    ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
+        intermediate = [] if return_intermediate else None
 
         for layer in self.layers:
             x, ffn_out = layer(x)
-            intermediate.append(ffn_out)
+            if return_intermediate:
+                intermediate.append(ffn_out)
 
         return self.final_norm(x), intermediate
 
@@ -144,14 +156,12 @@ class MAEDecoder(nn.Module):
         x_full = self.mask_token.expand(B, N_Total, D).clone()
 
         # --- Step B: Paste Visible Tokens ---
-        # Overwrite the mask tokens with the actual encoder output at the visible spots
-        for i in range(B):
-            # We use the boolean mask to select the "True" slots
-            x_full[i, mask[i]] = x_visible[i]
+        # Visible token count is fixed per sample, so boolean flatten assignment is valid.
+        x_full[mask] = x_visible.reshape(-1, D)
 
         # --- Step C: Add Positional Encoding ---
         # We call YOUR PosEnc class here.
-        # It takes coords (B, N_Total, 4) and returns (B, N_Total, Dim)
+        # It takes coords (B, N_Total, n_coords) and returns (B, N_Total, Dim)
         pos_emb = pos_enc(coords)
 
         # Add GPS info to the tokens
@@ -160,7 +170,7 @@ class MAEDecoder(nn.Module):
         # --- Step D: Decode ---
         # Pass through the Transformer
         # We ignore the intermediate outputs (the second return value) for now
-        x_decoded, _ = self.decoder(x_full)
+        x_decoded, _ = self.decoder(x_full, return_intermediate=False)
 
         # --- Step E: Predict ---
         # (Batch, N_Total, 512) -> (Batch, N_Total, 200)
@@ -169,124 +179,168 @@ class MAEDecoder(nn.Module):
         return prediction
 
 
-def generate_mask(coords: torch.Tensor, mask_ratio: float = 0.55, spatial_radius: float = 3.0, temporal_radius: float = 3.0):
+def _split_spatiotemporal_coords(coords: torch.Tensor, n_spatial_coords: int) -> tuple[torch.Tensor, torch.Tensor]:
+    if n_spatial_coords <= 0:
+        raise ValueError("n_spatial_coords must be > 0")
+    if coords.shape[-1] <= n_spatial_coords:
+        raise ValueError(
+            f"Expected coords last dim > n_spatial_coords, got {coords.shape[-1]} and {n_spatial_coords}"
+        )
+    spatial = coords[:, :, :n_spatial_coords]
+    temporal = coords[:, :, n_spatial_coords]
+    return spatial, temporal
+
+
+def generate_mask(
+    coords: torch.Tensor,
+    mask_ratio: float = 0.55,
+    spatial_radius: float = 3.0,
+    temporal_radius: float = 3.0,
+    n_spatial_coords: int = 3,
+):
     B, N, _ = coords.shape
     device = coords.device
-
-    # Calculate exact number of tokens to hide
     num_masked_target = int(mask_ratio * N)
 
-    # Start with all True (Visible)
+    spatial, temporal = _split_spatiotemporal_coords(coords, n_spatial_coords=n_spatial_coords)
+    dists_spatial = torch.cdist(spatial, spatial)
+    dists_temporal = torch.abs(temporal.unsqueeze(2) - temporal.unsqueeze(1))
+    block_black = (dists_spatial <= spatial_radius) & (dists_temporal <= temporal_radius)
+
     mask = torch.ones(B, N, dtype=torch.bool, device=device)
+    masked_count = torch.zeros(B, dtype=torch.long, device=device)
+    row_idx = torch.arange(B, device=device)
+    max_iters = max(8, N * 4)
 
-    for b in range(B):
-        spatial_coords = coords[b, :, :3]
-        temporal_coords = coords[b, :, 3]
+    for _ in range(max_iters):
+        active = masked_count < num_masked_target
+        if not torch.any(active):
+            break
+        seed_idx = torch.randint(0, N, (B,), device=device)
+        chosen = block_black[row_idx, seed_idx] & active.unsqueeze(1)
+        new_masked = chosen & mask
+        mask = mask & (~chosen)
+        masked_count = masked_count + new_masked.sum(dim=1)
 
-        # --- Phase 1: Block Masking Strategy ---
-        # Keep masking blocks until we meet or exceed the target
-        while (~mask[b]).sum() < num_masked_target:
-            # Pick random seed
-            seed_idx = torch.randint(0, N, (1,)).item()
+    # Enforce exact masked count per sample (fix over/under-shoot from stochastic blocks).
+    rand = torch.rand(B, N, device=device)
+    masked_scores = torch.where(~mask, rand, rand + 2.0)
+    keep_masked_idx = torch.argsort(masked_scores, dim=1)[:, :num_masked_target]
+    final_masked = torch.zeros(B, N, dtype=torch.bool, device=device)
+    final_masked.scatter_(1, keep_masked_idx, True)
 
-            # Calculate distances
-            seed_spatial = spatial_coords[seed_idx]
-            dists_spatial = torch.norm(spatial_coords - seed_spatial, dim=1)
+    return ~final_masked
 
-            seed_temporal = temporal_coords[seed_idx]
-            dists_temporal = torch.abs(temporal_coords - seed_temporal)
-
-            # Find block
-            in_block = (dists_spatial <= spatial_radius) & (dists_temporal <= temporal_radius)
-
-            # Mask this block (Set to False)
-            mask[b, in_block] = False
-
-        # --- Phase 2: Exact Count Enforcement ---
-        # We likely masked too many tokens. We must unmask the excess.
-
-        # Get indices of all tokens that are currently masked
-        masked_indices = torch.where(mask[b] == False)[0]
-        num_current_masked = len(masked_indices)
-
-        if num_current_masked > num_masked_target:
-            # We have excess. Randomly choose which ones to KEEP masked.
-            # Shuffle the masked indices
-            shuffled_indices = masked_indices[torch.randperm(num_current_masked)]
-
-            # The first 'num_masked_target' stay masked.
-            # The rest (excess) must be turned back to Visible (True).
-            excess_indices = shuffled_indices[num_masked_target:]
-
-            mask[b, excess_indices] = True
-
-    return mask
 
 def generate_partial_mask(
     coords: torch.Tensor,
+    num_channels: int,
+    num_patches: int,
     mask_ratio: float = 0.55,
     spatial_radius_black: float = 3.0,
     spatial_radius_fuzzy: float = 6.0,
     temporal_radius_black: float = 3.0,
     temporal_radius_fuzzy: float = 6.0,
+    dropout_ratio: float = 0.0,
+    dropout_radius: float = 3.0,
+    n_spatial_coords: int = 3,
 ):
     B, N, _ = coords.shape
     device = coords.device
+    if N != num_channels * num_patches:
+        raise ValueError(
+            f"Expected N == C*P, got N={N}, C={num_channels}, P={num_patches}."
+        )
 
-    # Calculate exact number of tokens to hide
+    # Calculate exact number of tokens to hide.
     num_masked_target = int(mask_ratio * N)
+    if num_masked_target <= 0:
+        mask = torch.ones(B, N, dtype=torch.bool, device=device)
+        return mask, torch.zeros_like(mask)
+
+    spatial, temporal = _split_spatiotemporal_coords(coords, n_spatial_coords=n_spatial_coords)
+
+    token_spatial_dists = torch.cdist(spatial, spatial)
+    token_temporal_dists = (temporal.unsqueeze(2) - temporal.unsqueeze(1)).abs()
+    token_black_neighbors = (
+        (token_spatial_dists <= spatial_radius_black) & (token_temporal_dists <= temporal_radius_black)
+    )
+    token_fuzzy_neighbors = (
+        (token_spatial_dists <= spatial_radius_fuzzy) & (token_temporal_dists <= temporal_radius_fuzzy)
+    )
+
+    # Seed a block mask in a vectorized way, then exact-correct to target count.
+    avg_black_block = max(1.0, float(token_black_neighbors.float().sum(dim=2).mean().item()))
+    num_seeds = min(N, max(1, int(math.ceil(num_masked_target / avg_black_block))))
+    seed_scores = torch.rand((B, N), device=device)
+    seed_idx = seed_scores.topk(k=num_seeds, dim=1, largest=False).indices
+    seed_mask = torch.zeros((B, N), dtype=torch.bool, device=device)
+    seed_mask.scatter_(1, seed_idx, True)
+    block_mask = (token_black_neighbors & seed_mask.unsqueeze(1)).any(dim=2)
+
+    dropped_token_mask = torch.zeros((B, N), dtype=torch.bool, device=device)
+    drop_channel_target = min(
+        num_channels,
+        int((dropout_ratio * num_masked_target) / max(1, num_patches)),
+    )
+    if drop_channel_target > 0:
+        channel_spatial = spatial.view(B, num_channels, num_patches, n_spatial_coords)[:, :, 0, :]
+        channel_dists = torch.cdist(channel_spatial, channel_spatial)
+        channel_neighbors = channel_dists <= dropout_radius
+
+        seed_scores_ch = torch.rand((B, num_channels), device=device)
+        seed_idx_ch = seed_scores_ch.topk(k=drop_channel_target, dim=1, largest=False).indices
+        seed_mask_ch = torch.zeros((B, num_channels), dtype=torch.bool, device=device)
+        seed_mask_ch.scatter_(1, seed_idx_ch, True)
+        dropped_channels = (channel_neighbors & seed_mask_ch.unsqueeze(1)).any(dim=2)
+
+        # Keep exact channel-drop budget.
+        curr_drop = dropped_channels.sum(dim=1)
+        over = (curr_drop - drop_channel_target).clamp_min(0)
+        if int(over.max().item()) > 0:
+            keep_scores = torch.rand((B, num_channels), device=device)
+            keep_scores = keep_scores.masked_fill(~dropped_channels, 2.0)
+            max_over = int(over.max().item())
+            idx = keep_scores.topk(k=max_over, dim=1, largest=False).indices
+            choose = torch.arange(max_over, device=device).view(1, -1) < over.view(-1, 1)
+            b_idx = torch.arange(B, device=device).view(-1, 1).expand(-1, max_over)
+            dropped_channels[b_idx[choose], idx[choose]] = False
+
+        channel_ids = (
+            torch.arange(num_channels, device=device)
+            .view(1, num_channels, 1)
+            .expand(B, -1, num_patches)
+            .reshape(B, -1)
+        )
+        dropped_token_mask = torch.gather(dropped_channels, 1, channel_ids)
 
     # mask=True means visible token, mask=False means fully hidden token.
-    # fuzzy_mask=True marks visible tokens that should get additive noise.
-    mask = torch.ones(B, N, dtype=torch.bool, device=device)
-    mask_fz = torch.zeros(B, N, dtype=torch.bool, device=device)
+    mask = ~(block_mask | dropped_token_mask)
 
+    # Exact-count correction without undoing mandatory dropped channels.
+    curr_masked = (~mask).sum(dim=1)
+    over = (curr_masked - num_masked_target).clamp_min(0)
+    max_over = int(over.max().item())
+    if max_over > 0:
+        can_unmask = (~mask) & (~dropped_token_mask)
+        scores = torch.rand((B, N), device=device).masked_fill(~can_unmask, 2.0)
+        idx = scores.topk(k=max_over, dim=1, largest=False).indices
+        choose = torch.arange(max_over, device=device).view(1, -1) < over.view(-1, 1)
+        b_idx = torch.arange(B, device=device).view(-1, 1).expand(-1, max_over)
+        mask[b_idx[choose], idx[choose]] = True
 
-    for b in range(B):
-        spatial_coords = coords[b, :, :3]
-        temporal_coords = coords[b, :, 3]
+    curr_masked = (~mask).sum(dim=1)
+    need = (num_masked_target - curr_masked).clamp_min(0)
+    max_need = int(need.max().item())
+    if max_need > 0:
+        can_mask = mask & (~dropped_token_mask)
+        scores = torch.rand((B, N), device=device).masked_fill(~can_mask, 2.0)
+        idx = scores.topk(k=max_need, dim=1, largest=False).indices
+        choose = torch.arange(max_need, device=device).view(1, -1) < need.view(-1, 1)
+        b_idx = torch.arange(B, device=device).view(-1, 1).expand(-1, max_need)
+        mask[b_idx[choose], idx[choose]] = False
 
-        # --- Phase 1: Block Masking Strategy ---
-        # Keep masking blocks until we meet or exceed the target
-        while (~mask[b]).sum() < num_masked_target:
-            # Pick random seed
-            seed_idx = torch.randint(0, N, (1,)).item()
-
-            # Calculate distances
-            seed_spatial = spatial_coords[seed_idx]
-            dists_spatial = torch.norm(spatial_coords - seed_spatial, dim=1)
-
-            seed_temporal = temporal_coords[seed_idx]
-            dists_temporal = torch.abs(temporal_coords - seed_temporal)
-
-            # Find block
-            in_block_black = (dists_spatial <= spatial_radius_black) & (dists_temporal <= temporal_radius_black)
-            in_block_fuzzy = (dists_spatial <= spatial_radius_fuzzy) & (dists_temporal <= temporal_radius_fuzzy)
-
-            # Mask this block (Set to False)
-            mask[b, in_block_black] = False
-            mask_fz[b, in_block_fuzzy] = True
-
-        # --- Phase 2: Exact Count Enforcement ---
-        # We likely masked too many tokens. We must unmask the excess.
-
-        # Get indices of all tokens that are currently masked
-        masked_indices = torch.where(mask[b] == False)[0]
-        num_current_masked = len(masked_indices)
-
-        if num_current_masked > num_masked_target:
-            # We have excess. Randomly choose which ones to KEEP masked.
-            # Shuffle the masked indices
-            shuffled_indices = masked_indices[torch.randperm(num_current_masked)]
-
-            # The first 'num_masked_target' stay masked.
-            # The rest (excess) must be turned back to Visible (True).
-            excess_indices = shuffled_indices[num_masked_target:]
-
-            mask[b, excess_indices] = True
-
-        # Fuzzy noise is only applied to currently visible tokens.
-        mask_fz[b] = mask_fz[b] & mask[b]
+    mask_fz = (token_fuzzy_neighbors & (~mask).unsqueeze(1)).any(dim=2) & mask
 
     return mask, mask_fz
 
@@ -313,6 +367,14 @@ class MAE(nn.Module):
         spatial_radius_fuzzy: float = 6.0,
         temporal_radius_black: float = 3.0,
         temporal_radius_fuzzy: float = 6.0,
+        dropout_ratio: float = 0.0,
+        dropout_radius: float = 3.0,
+        ema_mix_ratio: float = 0.6,
+        ema_temperature: float = 2.0,
+        ema_floor_eps: float = 0.1,
+        use_pairwise_channel_diffs: bool = False,
+        n_spatial_coords: int = 3,
+        posenc_n_freqs: int = 4,
     ):
         super().__init__()
 
@@ -325,6 +387,14 @@ class MAE(nn.Module):
         self.spatial_radius_fuzzy = spatial_radius_fuzzy
         self.temporal_radius_black = temporal_radius_black
         self.temporal_radius_fuzzy = temporal_radius_fuzzy
+        self.dropout_ratio = dropout_ratio
+        self.dropout_radius = dropout_radius
+        self.ema_mix_ratio = ema_mix_ratio
+        self.ema_temperature = ema_temperature
+        self.ema_floor_eps = ema_floor_eps
+        self.use_pairwise_channel_diffs = bool(use_pairwise_channel_diffs)
+        self.n_spatial_coords = 6 if self.use_pairwise_channel_diffs else int(n_spatial_coords)
+        self.posenc_n_freqs = int(posenc_n_freqs)
 
         if self.which_mask not in {"default", "fuzzy"}:
             raise ValueError(f"which_mask must be one of ['default', 'fuzzy'], got '{self.which_mask}'")
@@ -334,6 +404,20 @@ class MAE(nn.Module):
             raise ValueError("spatial_radius_fuzzy must be >= spatial_radius_black")
         if self.temporal_radius_fuzzy < self.temporal_radius_black:
             raise ValueError("temporal_radius_fuzzy must be >= temporal_radius_black")
+        if not 0.0 <= self.dropout_ratio <= 1.0:
+            raise ValueError("dropout_ratio must be in [0, 1]")
+        if self.dropout_radius < 0.0:
+            raise ValueError("dropout_radius must be >= 0")
+        if not 0.0 <= self.ema_mix_ratio <= 1.0:
+            raise ValueError("ema_mix_ratio must be in [0, 1]")
+        if self.ema_temperature <= 0.0:
+            raise ValueError("ema_temperature must be > 0")
+        if not 0.0 <= self.ema_floor_eps <= 1.0:
+            raise ValueError("ema_floor_eps must be in [0, 1]")
+        if self.n_spatial_coords <= 0:
+            raise ValueError("n_spatial_coords must be > 0")
+        if self.posenc_n_freqs <= 0:
+            raise ValueError("posenc_n_freqs must be > 0")
 
         # 1. Input Processing
         self.patch_embed = PatchEmbed(fs, patch_seconds, overlap_seconds, embed_dim)
@@ -343,7 +427,11 @@ class MAE(nn.Module):
         self.step = self.patch_embed.step
 
         # 2. Positional Encoding (Shared between Encoder and Decoder)
-        self.pos_enc = PosEnc(n_freqs=4, embed_dim=embed_dim)
+        self.pos_enc = PosEnc(
+            n_freqs=self.posenc_n_freqs,
+            embed_dim=embed_dim,
+            n_coords=self.n_spatial_coords + 1,
+        )
 
         # 3. Encoder
         self.encoder = TransformerEncoderDecoder(embed_dim=embed_dim, depth=encoder_depth, heads=encoder_heads)
@@ -384,26 +472,202 @@ class MAE(nn.Module):
 
     def prepare_coords(self, xyz: torch.Tensor, num_patches: int):
         B, C, _ = xyz.shape
+        if xyz.shape[-1] != self.n_spatial_coords:
+            raise ValueError(
+                f"Expected xyz last dim == {self.n_spatial_coords}, got {xyz.shape[-1]}"
+            )
         device = xyz.device
 
         # 2. Generate Time Indices (0, 1, 2, ... P-1)
         time_idx = torch.arange(num_patches, device=device, dtype=torch.float32)
 
         # 3. Expand Spatial Coords
-        # (B, C, 3) -> (B, C, 1, 3) -> (B, C, P, 3)
+        # (B, C, S) -> (B, C, 1, S) -> (B, C, P, S)
         spat = xyz.unsqueeze(2).expand(-1, -1, num_patches, -1)
 
         # 4. Expand Time Coords
         # (P,) -> (1, 1, P, 1) -> (B, C, P, 1)
         time = time_idx.view(1, 1, num_patches, 1).expand(B, C, -1, -1)
 
-        # 5. Concatenate -> (B, C, P, 4)
+        # 5. Concatenate -> (B, C, P, S+1)
         coords = torch.cat([spat, time], dim=-1)
 
-        # 6. Flatten to (B, N_Total, 4)
+        # 6. Flatten to (B, N_Total, S+1)
         return coords.flatten(1, 2)
 
-    def forward(self, x: torch.Tensor, xyz: torch.Tensor):
+    def _to_pairwise_channels(self, x: torch.Tensor, xyz: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if not self.use_pairwise_channel_diffs:
+            return x, xyz
+
+        if xyz.shape[-1] != 3:
+            raise ValueError(
+                f"Pairwise channel diffs expect xyz with last dim 3, got {xyz.shape[-1]}"
+            )
+        if x.shape[1] != xyz.shape[1]:
+            raise ValueError(
+                f"x/xyz channel mismatch: x has {x.shape[1]}, xyz has {xyz.shape[1]}"
+            )
+        if x.shape[1] < 2:
+            raise ValueError("Pairwise channel diffs require at least 2 channels")
+
+        i, j = torch.triu_indices(x.shape[1], x.shape[1], offset=1, device=x.device)
+        x_pair = (x[:, i, :] - x[:, j, :]) / math.sqrt(2.0)
+        xyz_pair = torch.cat([xyz[:, i, :], xyz[:, j, :]], dim=-1)
+
+        # Keep original channels and append pairwise channels:
+        # C -> C + C*(C-1)/2
+        # Original xyz are repeated to match 6D pair coordinate schema.
+        xyz_orig = torch.cat([xyz, xyz], dim=-1)
+        x_all = torch.cat([x, x_pair], dim=1)
+        xyz_all = torch.cat([xyz_orig, xyz_pair], dim=1)
+        return x_all, xyz_all
+
+    def _sample_mask_from_ema(
+        self,
+        ema_scores: torch.Tensor,
+        batch_size: int,
+        num_channels: int,
+        num_patches: int,
+        device: torch.device,
+        base_mask: torch.Tensor | None = None,
+        target_masked: int | None = None,
+    ) -> torch.Tensor:
+        N = num_channels * num_patches
+        num_masked_target = int(self.mask_ratio * N) if target_masked is None else int(target_masked)
+        num_masked_target = min(max(0, num_masked_target), N)
+
+        if ema_scores.numel() != N:
+            raise ValueError(
+                f"EMA scores size mismatch: expected {N}, got {ema_scores.numel()}"
+            )
+
+        logits = ema_scores.reshape(-1).to(device=device, dtype=torch.float32)
+        logits = torch.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0)
+        probs = torch.softmax(logits / self.ema_temperature, dim=0)
+        if self.ema_floor_eps > 0.0:
+            probs = (1.0 - self.ema_floor_eps) * probs + (self.ema_floor_eps / float(N))
+        probs = probs / probs.sum().clamp_min(1e-12)
+
+        if base_mask is None:
+            mask = torch.ones((batch_size, N), dtype=torch.bool, device=device)
+        else:
+            if base_mask.shape != (batch_size, N):
+                raise ValueError(
+                    f"base_mask shape mismatch: expected {(batch_size, N)}, got {tuple(base_mask.shape)}"
+                )
+            mask = base_mask.clone()
+
+        if num_masked_target > 0:
+            for b in range(batch_size):
+                curr_masked = int((~mask[b]).sum().item())
+                need = num_masked_target - curr_masked
+                if need <= 0:
+                    continue
+
+                visible_idx = torch.where(mask[b])[0]
+                if visible_idx.numel() == 0:
+                    continue
+
+                if need >= int(visible_idx.numel()):
+                    mask[b, visible_idx] = False
+                    continue
+
+                visible_probs = probs[visible_idx]
+                visible_probs = visible_probs / visible_probs.sum().clamp_min(1e-12)
+                pick_local = torch.multinomial(visible_probs, num_samples=need, replacement=False)
+                pick_idx = visible_idx[pick_local]
+                mask[b, pick_idx] = False
+
+        return mask
+
+    @staticmethod
+    def _ratio_for_exact_count(num_to_mask: int, total: int) -> float:
+        if total <= 0:
+            return 0.0
+        if num_to_mask <= 0:
+            return 0.0
+        if num_to_mask >= total:
+            return 1.0
+        return float(num_to_mask + 0.01) / float(total)
+
+    def _sample_block_mask(
+        self,
+        coords: torch.Tensor,
+        num_channels: int,
+        num_patches: int,
+        num_masked_target: int,
+    ) -> torch.Tensor:
+        N = num_channels * num_patches
+        if num_masked_target <= 0:
+            return torch.ones((coords.shape[0], N), dtype=torch.bool, device=coords.device)
+        if num_masked_target >= N:
+            return torch.zeros((coords.shape[0], N), dtype=torch.bool, device=coords.device)
+
+        block_ratio = self._ratio_for_exact_count(num_masked_target, N)
+        if self.which_mask == "default":
+            return generate_mask(
+                coords,
+                mask_ratio=block_ratio,
+                spatial_radius=self.spatial_radius_black,
+                temporal_radius=self.temporal_radius_black,
+                n_spatial_coords=self.n_spatial_coords,
+            )
+
+        block_mask, _ = generate_partial_mask(
+            coords,
+            num_channels=num_channels,
+            num_patches=num_patches,
+            mask_ratio=block_ratio,
+            spatial_radius_black=self.spatial_radius_black,
+            spatial_radius_fuzzy=self.spatial_radius_fuzzy,
+            temporal_radius_black=self.temporal_radius_black,
+            temporal_radius_fuzzy=self.temporal_radius_fuzzy,
+            dropout_ratio=self.dropout_ratio,
+            dropout_radius=self.dropout_radius,
+            n_spatial_coords=self.n_spatial_coords,
+        )
+        return block_mask
+
+    def _fuzzy_halo(self, mask: torch.Tensor, coords: torch.Tensor) -> torch.Tensor:
+        # mask: (B, N) with False at masked positions
+        if self.which_mask != "fuzzy":
+            return torch.zeros_like(mask)
+
+        B, N, _ = coords.shape
+        halo = torch.zeros((B, N), dtype=torch.bool, device=coords.device)
+
+        for b in range(B):
+            masked_idx = torch.where(~mask[b])[0]
+            if masked_idx.numel() == 0:
+                continue
+
+            spatial_all = coords[b, :, : self.n_spatial_coords]
+            spatial_masked = spatial_all[masked_idx]
+            temporal_all = coords[b, :, self.n_spatial_coords]
+            temporal_masked = coords[b, masked_idx, self.n_spatial_coords]
+
+            d_spatial = torch.cdist(spatial_all, spatial_masked)
+            d_temporal = (temporal_all.unsqueeze(1) - temporal_masked.unsqueeze(0)).abs()
+
+            halo_b = (d_spatial <= self.spatial_radius_fuzzy) & (d_temporal <= self.temporal_radius_fuzzy)
+            halo[b] = halo_b.any(dim=1) & mask[b]
+
+        return halo
+
+    def num_patches_for_length(self, total_samples: int) -> int:
+        if total_samples < self.patch_size:
+            return 0
+        return int(((total_samples - self.patch_size) // self.step) + 1)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        xyz: torch.Tensor,
+        mask_strategy: str = "random",
+        ema_scores: torch.Tensor | None = None,
+        return_token_l1: bool = False,
+    ):
+        x, xyz = self._to_pairwise_channels(x, xyz)
         B, _, _ = x.shape
 
         # --- 1. Patchify & Embed ---
@@ -418,21 +682,57 @@ class MAE(nn.Module):
         tokens_flat = tokens.flatten(1, 2)
         patches_flat = patches.flatten(1, 2)  # Target for loss
 
-        # --- 2. Prepare 4D Coordinates ---
+        # --- 2. Prepare Coordinates (S spatial + 1 temporal) ---
         coords = self.prepare_coords(xyz, num_patches)
 
         # --- 3. Generate Mask ---
         # Returns mask where counts are GUARANTEED to be equal across batch
-        if self.which_mask == "default":
-            mask = generate_mask(coords, mask_ratio=self.mask_ratio)
+        fuzzy_mask = None
+        if mask_strategy == "ema" and ema_scores is not None:
+            N = x.shape[1] * num_patches
+            num_masked_target = int(self.mask_ratio * N)
+            num_masked_target = min(max(0, num_masked_target), N)
+            num_ema = int(round(self.ema_mix_ratio * num_masked_target))
+            num_ema = min(max(0, num_ema), num_masked_target)
+            num_block = num_masked_target - num_ema
+
+            block_mask = self._sample_block_mask(
+                coords=coords,
+                num_channels=x.shape[1],
+                num_patches=num_patches,
+                num_masked_target=num_block,
+            )
+            mask = self._sample_mask_from_ema(
+                ema_scores=ema_scores,
+                batch_size=B,
+                num_channels=x.shape[1],
+                num_patches=num_patches,
+                device=x.device,
+                base_mask=block_mask,
+                target_masked=num_masked_target,
+            )
+            fuzzy_mask = self._fuzzy_halo(mask, coords)
+        elif self.which_mask == "default":
+            mask = generate_mask(
+                coords,
+                mask_ratio=self.mask_ratio,
+                spatial_radius=self.spatial_radius_black,
+                temporal_radius=self.temporal_radius_black,
+                n_spatial_coords=self.n_spatial_coords,
+            )
         else:
             mask, fuzzy_mask = generate_partial_mask(
                 coords,
+                num_channels=x.shape[1],
+                num_patches=num_patches,
                 mask_ratio=self.mask_ratio,
                 spatial_radius_black=self.spatial_radius_black,
                 spatial_radius_fuzzy=self.spatial_radius_fuzzy,
                 temporal_radius_black=self.temporal_radius_black,
                 temporal_radius_fuzzy=self.temporal_radius_fuzzy,
+                dropout_ratio=self.dropout_ratio,
+                dropout_radius=self.dropout_radius,
+                n_spatial_coords=self.n_spatial_coords,
             )
 
         # --- 4. Prepare Encoder Input ---
@@ -446,6 +746,8 @@ class MAE(nn.Module):
         n_vis = int(mask[0].sum().item())
 
         if self.which_mask == "fuzzy" and self.fuzzy_noise_std > 0.0:
+            if fuzzy_mask is None:
+                fuzzy_mask = torch.zeros_like(mask)
             fuzzy_visible = fuzzy_mask & mask
             noise = torch.randn_like(tokens_flat) * self.fuzzy_noise_std
             tokens_flat = torch.where(fuzzy_visible.unsqueeze(-1), tokens_flat + noise, tokens_flat)
@@ -507,4 +809,10 @@ class MAE(nn.Module):
 
         total_loss = loss_main + self.aux_loss_weight * loss_aux
 
+        masked_l1 = (pred_main_masked - target_masked).abs().mean(dim=-1)
+        token_l1 = torch.zeros((B, mask.shape[1]), device=predictions_main.device, dtype=masked_l1.dtype)
+        token_l1[~mask] = masked_l1.view(-1)
+
+        if return_token_l1:
+            return total_loss, predictions_main, mask, token_l1
         return total_loss, predictions_main, mask

@@ -2,8 +2,10 @@
 MANAS adapter for EEG-FM-Bench.
 """
 
+import json
 import logging
-from typing import List, Dict, Any
+import os
+from typing import List, Dict, Any, Optional
 
 import mne
 import numpy as np
@@ -11,6 +13,7 @@ import torch
 from datasets import Dataset as HFDataset
 
 from baseline.abstract.adapter import AbstractDatasetAdapter, AbstractDataLoaderFactory
+from common.path import PROJECT_ROOT
 from common.utils import ElectrodeSet
 
 logger = logging.getLogger("baseline")
@@ -28,6 +31,8 @@ IGNORE_CHANS = {
 
 class ManasDatasetAdapter(AbstractDatasetAdapter):
     """MANAS dataset adapter that attaches channel positions from MNE montage."""
+    MNE_POSITION_SCALE: float = 100.0
+    JSON_POSITION_SCALE: float = 1.0
 
     def __init__(
         self,
@@ -35,9 +40,18 @@ class ManasDatasetAdapter(AbstractDatasetAdapter):
         dataset_names: List[str],
         dataset_configs: List[str],
         target_fs: int = 200,
+        use_legacy_mne_positions: bool = True,
+        positions_json_path: Optional[str] = None,
     ):
         self.electrode_set: ElectrodeSet = ElectrodeSet()
         self.target_fs = target_fs
+        self.use_legacy_mne_positions = bool(use_legacy_mne_positions)
+        self.positions_json_path = positions_json_path
+        self._position_cache: Dict[tuple[str, ...], torch.Tensor] = {}
+        self._missing_json_pos_warned: set[tuple[str, ...]] = set()
+        self._json_positions: Dict[str, torch.Tensor] = {}
+        if not self.use_legacy_mne_positions:
+            self._json_positions = self._load_positions_json(positions_json_path)
         super().__init__(dataset, dataset_names, dataset_configs)
 
     def _setup_adapter(self):
@@ -49,14 +63,129 @@ class ManasDatasetAdapter(AbstractDatasetAdapter):
         return self.electrode_set.Electrodes
 
     @staticmethod
-    def _make_positions(channel_names: List[str]) -> torch.Tensor:
-        mne_info = mne.create_info(channel_names, sfreq=100, ch_types="eeg")
+    def _normalize_channel_name(channel_name: str) -> str:
+        name = channel_name.strip().upper()
+        if name.startswith("EEG "):
+            name = name[4:]
+        name = name.replace(" ", "").replace("-", "").replace("_", "")
+        return name
+
+    @staticmethod
+    def _resolve_positions_json_path(positions_json_path: Optional[str]) -> str:
+        default_path = os.path.join(PROJECT_ROOT, "positions.json")
+        if positions_json_path is None:
+            if not os.path.isfile(default_path):
+                raise FileNotFoundError(f"positions.json not found at default path: {default_path}")
+            return default_path
+
+        if os.path.isabs(positions_json_path):
+            resolved = positions_json_path
+            if not os.path.isfile(resolved):
+                raise FileNotFoundError(f"positions_json_path does not exist: {resolved}")
+            return resolved
+
+        cwd_candidate = os.path.abspath(positions_json_path)
+        if os.path.isfile(cwd_candidate):
+            return cwd_candidate
+
+        project_candidate = os.path.join(PROJECT_ROOT, positions_json_path)
+        if os.path.isfile(project_candidate):
+            return project_candidate
+
+        raise FileNotFoundError(
+            f"Relative positions_json_path not found: {positions_json_path} "
+            f"(checked {cwd_candidate} and {project_candidate})"
+        )
+
+    def _load_positions_json(self, positions_json_path: Optional[str]) -> Dict[str, torch.Tensor]:
+        resolved_path = self._resolve_positions_json_path(positions_json_path)
+        with open(resolved_path, "r", encoding="utf-8") as fp:
+            raw_obj = json.load(fp)
+
+        if isinstance(raw_obj, dict) and "positions" in raw_obj and isinstance(raw_obj["positions"], dict):
+            raw_obj = raw_obj["positions"]
+
+        if not isinstance(raw_obj, dict):
+            raise ValueError(f"Unsupported positions JSON format in {resolved_path}: expected object mapping.")
+
+        parsed: Dict[str, torch.Tensor] = {}
+        for ch_name, coords in raw_obj.items():
+            if not isinstance(ch_name, str):
+                continue
+            if not isinstance(coords, (list, tuple)) or len(coords) < 3:
+                continue
+
+            try:
+                xyz = torch.tensor([float(coords[0]), float(coords[1]), float(coords[2])], dtype=torch.float32)
+            except (TypeError, ValueError):
+                continue
+
+            # Keep JSON coordinates as-is (no scaling).
+            parsed[self._normalize_channel_name(ch_name)] = self.JSON_POSITION_SCALE * xyz
+
+        if not parsed:
+            raise ValueError(f"No valid channel coordinates found in {resolved_path}")
+
+        logger.info(f"MANAS loaded {len(parsed)} channel positions from {resolved_path}")
+        return parsed
+
+    def _make_positions_mne(self, channel_names: List[str]) -> torch.Tensor:
+        cache_key = tuple(ch.upper() for ch in channel_names)
+        cached = self._position_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        mne_info = mne.create_info(list(cache_key), sfreq=100, ch_types="eeg")
         raw_obj = mne.io.RawArray(np.zeros((len(channel_names), 100)), mne_info, verbose=False)
         montage = mne.channels.make_standard_montage("standard_1020")
         raw_obj.set_montage(montage, match_case=False, on_missing="raise")
         pos = raw_obj.get_montage().get_positions()["ch_pos"].values()
         pos_np = np.asarray(list(pos), dtype=np.float32)
-        return 100 * torch.from_numpy(pos_np)
+        # Legacy MNE path uses scaled coordinates for historical compatibility.
+        positions = self.MNE_POSITION_SCALE * torch.from_numpy(pos_np)
+        self._position_cache[cache_key] = positions
+        return positions
+
+    def _make_positions_json(self, channel_names: List[str]) -> Optional[torch.Tensor]:
+        cache_key = tuple(ch.upper() for ch in channel_names)
+        cached = self._position_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        coords: List[torch.Tensor] = []
+        missing: List[str] = []
+        for ch_name in channel_names:
+            key = self._normalize_channel_name(ch_name)
+            pos = self._json_positions.get(key)
+            if pos is None:
+                missing.append(ch_name)
+            else:
+                coords.append(pos)
+
+        if missing:
+            missing_key = tuple(m.upper() for m in missing)
+            if missing_key not in self._missing_json_pos_warned:
+                logger.warning(
+                    "MANAS positions.json missing channels %s; falling back to legacy MNE generation for this montage.",
+                    missing,
+                )
+                self._missing_json_pos_warned.add(missing_key)
+            return None
+
+        positions = torch.stack(coords, dim=0).to(torch.float32)
+        self._position_cache[cache_key] = positions
+        return positions
+
+    def _make_positions(self, channel_names: List[str]) -> torch.Tensor:
+        if self.use_legacy_mne_positions:
+            return self._make_positions_mne(channel_names)
+
+        json_positions = self._make_positions_json(channel_names)
+        if json_positions is not None:
+            return json_positions
+
+        # Keep compatibility when JSON does not include some channels.
+        return self._make_positions_mne(channel_names)
 
     def _resample(self, data: torch.Tensor, orig_fs: int | None) -> torch.Tensor:
         if orig_fs is None or orig_fs == self.target_fs:
@@ -117,9 +246,13 @@ class ManasDataLoaderFactory(AbstractDataLoaderFactory):
         num_workers: int = 2,
         seed: int = 42,
         target_fs: int = 200,
+        use_legacy_mne_positions: bool = True,
+        positions_json_path: Optional[str] = None,
     ):
         super().__init__(batch_size, num_workers, seed)
         self.target_fs = target_fs
+        self.use_legacy_mne_positions = bool(use_legacy_mne_positions)
+        self.positions_json_path = positions_json_path
 
     def create_adapter(
         self,
@@ -132,4 +265,6 @@ class ManasDataLoaderFactory(AbstractDataLoaderFactory):
             dataset_names,
             dataset_configs,
             target_fs=self.target_fs,
+            use_legacy_mne_positions=self.use_legacy_mne_positions,
+            positions_json_path=self.positions_json_path,
         )
