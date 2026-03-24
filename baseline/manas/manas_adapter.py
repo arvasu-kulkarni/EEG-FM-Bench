@@ -32,7 +32,7 @@ IGNORE_CHANS = {
 class ManasDatasetAdapter(AbstractDatasetAdapter):
     """MANAS dataset adapter that attaches channel positions from MNE montage."""
     MNE_POSITION_SCALE: float = 100.0
-    JSON_POSITION_SCALE: float = 1.0
+    JSON_POSITION_SCALE: float = 100.0
 
     def __init__(
         self,

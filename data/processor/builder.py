@@ -6,7 +6,8 @@ import os
 import shutil
 import warnings
 from abc import ABC
-from dataclasses import dataclass,  field
+from copy import deepcopy
+from dataclasses import dataclass, field, fields
 from typing import Optional, Union, Any
 
 import mne
@@ -93,6 +94,7 @@ class EEGConfig(BuilderConfig):
     test_ratio: float = 0.10
     # sample length
     wnd_div_sec: int = 10
+    native_epoch_sec: Optional[int] = None
 
     # dataset path conf
     suffix_path: str = ''
@@ -104,6 +106,11 @@ class EEGConfig(BuilderConfig):
 
     def __post_init__(self):
         super().__post_init__()
+
+        if self.native_epoch_sec is None:
+            self.native_epoch_sec = self.wnd_div_sec
+
+        self.validate_windowing()
 
         # renew fs dependent items
         fs = self.fs
@@ -121,9 +128,28 @@ class EEGConfig(BuilderConfig):
     def get_fs_id(self) -> str:
         return f"fs_{int(self.fs)}"
 
+    def validate_windowing(self):
+        if self.native_epoch_sec is None or self.native_epoch_sec <= 0:
+            raise ValueError(
+                f"{self.dataset_name}/{self.name}: native_epoch_sec must be a positive integer, "
+                f"got {self.native_epoch_sec}."
+            )
+        if self.wnd_div_sec <= 0:
+            raise ValueError(f"{self.dataset_name}/{self.name}: wnd_div_sec must be positive, got {self.wnd_div_sec}.")
+        if self.wnd_div_sec % self.native_epoch_sec != 0:
+            raise ValueError(
+                f"{self.dataset_name}/{self.name}: wnd_div_sec={self.wnd_div_sec} must be an integer multiple of "
+                f"native_epoch_sec={self.native_epoch_sec}."
+            )
+
+    def get_window_multiple(self) -> int:
+        self.validate_windowing()
+        return self.wnd_div_sec // self.native_epoch_sec
+
     def apply_fs(self, fs: float):
         """Apply sampling rate and update all fs-dependent paths."""
         self.fs = fs
+        self.validate_windowing()
 
         # FS-dependent paths (include fs_id)
         self.data_path = os.path.join(self.database_proc_root, self.get_fs_id())
@@ -144,22 +170,37 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
         BUILDER_CONFIG_CLASS(name='finetune', is_finetune=True),]
 
     def __init__(self, config_name='pretrain', fs: Optional[float] = None, **kwargs):
-        # Override sampling rate if specified
-        if fs is not None:
-            self.builder_configs[config_name].apply_fs(float(fs))
-        else:
-            self.builder_configs[config_name].apply_fs(256.0)
+        base_conf: EEGConfig = deepcopy(self.builder_configs.get(config_name))
+        config_field_names = {item.name for item in fields(type(base_conf))}
+        config_kwargs = {key: value for key, value in kwargs.items() if key in config_field_names}
+        builder_kwargs = {key: value for key, value in kwargs.items() if key not in config_field_names}
 
-        conf: EEGConfig = self.builder_configs.get(config_name)
+        for key, value in config_kwargs.items():
+            setattr(base_conf, key, value)
+
+        if fs is not None:
+            base_conf.apply_fs(float(fs))
+        else:
+            base_conf.apply_fs(float(base_conf.fs))
+
+        conf: EEGConfig = base_conf
 
         # Arrow cache path is now directly from data_path (already includes dataset_name/fs_id)
+        forwarded_config_kwargs = {
+            key: value for key, value in config_kwargs.items()
+            if key not in {'dataset_name', 'writer_batch_size'}
+        }
+
         super().__init__(
             cache_dir=conf.data_path,
             dataset_name=conf.dataset_name,
             config_name=config_name,
             writer_batch_size=conf.writer_batch_size,
-            **kwargs
+            **forwarded_config_kwargs,
+            **builder_kwargs
         )
+        self.config = conf
+        self.dataset_name = conf.dataset_name
         self.split_corr: dict = {
             'train': 0,
             'valid': 1,
@@ -180,8 +221,8 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
         self.log_err_files_path = os.path.join(conf.log_root, f'{self.config.name}_err_files.txt')
         setup_log(file_path=self.log_path, name='preproc')
 
-        # Summary path for raw data info (not sampling rate dependent)
-        self.summary_path = os.path.join(conf.raw_path, 'summary', self.config.name)
+        # Summary files live in cache space so preprocessing does not require write access to raw data.
+        self.summary_path = os.path.join(conf.database_cache_root, 'summary', self.dataset_name, self.config.name)
         self.info_csv_path = os.path.join(self.summary_path, f'{self.dataset_name}_{self.config.name}_info.csv')
         # Cache file list is fs-dependent (parquet files are resampled to specific fs)
         self.mid_file_csv_path = os.path.join(self.summary_path, f'{self.dataset_name}_{self.config.name}_{self.config.get_fs_id()}_cache_files.csv')
@@ -296,7 +337,8 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
         split_df.to_csv(self.info_csv_path, index=False)
 
         # split_df = pd.read_csv(self.info_csv_path)
-        self._generate_middle_files(split_df, n_proc)
+        mid_df = self._generate_middle_files(split_df, n_proc)
+        self._log_window_generation_summary(mid_df)
 
         self._mark_preproc_done()
 
@@ -387,7 +429,7 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
         """
         try:
             # Remove fs-specific files: done marker and mid_file_csv
-            done_marker = os.path.join(self.summary_path, f'{self.config.name}_{self.config.get_fs_id()}.done')
+            done_marker = self._done_marker_path()
             if os.path.exists(done_marker):
                 os.remove(done_marker)
                 logger.info(f'Removed done marker: {done_marker}')
@@ -440,8 +482,42 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
             desc='Generating wnd samples and persisting parquet files')
 
         mid_dfs = [item for item in results if item is not None]
-        mid_df: DataFrame = pd.concat(mid_dfs, ignore_index=True, axis=0)
-        mid_df.to_csv(self.mid_file_csv_path, index=False)
+        all_mid_df = pd.DataFrame(columns=['key', 'split', 'cnt', 'possible_wnd_cnt', 'created_wnd_cnt'])
+        if len(mid_dfs) > 0:
+            all_mid_df = pd.concat(mid_dfs, ignore_index=True, axis=0)
+
+        valid_mid_df = all_mid_df[all_mid_df['cnt'] > 0].reset_index(drop=True)
+        valid_mid_df.to_csv(self.mid_file_csv_path, index=False)
+        return all_mid_df
+
+    def _log_window_generation_summary(self, mid_df: Optional[DataFrame]):
+        if mid_df is None or len(mid_df) < 1:
+            logger.info(
+                "%s/%s produced no window samples at fs=%sHz.",
+                self.config.dataset_name,
+                self.config.name,
+                int(self.config.fs),
+            )
+            return
+
+        if 'possible_wnd_cnt' not in mid_df.columns or 'created_wnd_cnt' not in mid_df.columns:
+            return
+
+        possible = int(mid_df['possible_wnd_cnt'].fillna(0).sum())
+        created = int(mid_df['created_wnd_cnt'].fillna(0).sum())
+        multiple = self.config.get_window_multiple()
+        logger.info(
+            "Window summary for %s/%s at fs=%sHz: native_epoch=%ss, window=%ss (x%d), "
+            "created %d/%d possible windows.",
+            self.config.dataset_name,
+            self.config.name,
+            int(self.config.fs),
+            self.config.native_epoch_sec,
+            self.config.wnd_div_sec,
+            multiple,
+            created,
+            possible,
+        )
 
     def _build_output_dir(self, split: str, filename: str):
         base_path: str = self.config.mid_path
@@ -461,38 +537,39 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
                 raw = self._fetch_signal_ndarray(data)
                 chs_idx = self._fetch_chs_index(montage)
 
-                examples = self._generate_window_sample(raw, montage, chs_idx, label, self.config.persist_drop_last)
-                if len(examples) < 1:
-                    return None
-
-                df = pd.DataFrame(data=examples)
-                df['subject'] = str(subject)
+                examples, stats = self._generate_window_sample(raw, montage, chs_idx, label, self.config.persist_drop_last)
                 filename = f"{self._encode_path(path)}.parquet"
-                output_path = self._build_output_dir(split, filename)
+                if len(examples) > 0:
+                    df = pd.DataFrame(data=examples)
+                    df['subject'] = str(subject)
+                    output_path = self._build_output_dir(split, filename)
 
-                if self.config.is_remote_fs:
-                    fs = s3fs.S3FileSystem(**self.s3_conf)
-                    with fs.open(output_path, 'wb') as f:
+                    if self.config.is_remote_fs:
+                        fs = s3fs.S3FileSystem(**self.s3_conf)
+                        with fs.open(output_path, 'wb') as f:
+                            df.to_parquet(
+                                f,
+                                compression=self.config.mid_compress_algo,
+                                engine='pyarrow',
+                                index=False)
+                        fs.invalidate_cache()
+                    else:
                         df.to_parquet(
-                            f,
+                            output_path,
                             compression=self.config.mid_compress_algo,
                             engine='pyarrow',
                             index=False)
-                    fs.invalidate_cache()
-                else:
-                    df.to_parquet(
-                        output_path,
-                        compression=self.config.mid_compress_algo,
-                        engine='pyarrow',
-                        index=False)
         except Exception as e:
             logger.error(f"Error persisting example file {path}: {str(e)}")
             return None
 
         mid_df = pd.DataFrame(data={
-            'key': [filename],
+            'key': [filename if len(examples) > 0 else None],
             'split': [split],
-            'cnt': [len(examples)],})
+            'cnt': [len(examples)],
+            'possible_wnd_cnt': [stats['possible_wnd_cnt']],
+            'created_wnd_cnt': [stats['created_wnd_cnt']],
+        })
         return mid_df
 
     def _generate_window_sample(
@@ -518,10 +595,18 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
             montage, task type). If the data length is insufficient for even a single window, None is returned.
         """
         wnds = []
+        stats = {
+            'possible_wnd_cnt': 0,
+            'created_wnd_cnt': 0,
+        }
 
         signal_len = raw.shape[1]
         if signal_len < self.config.wnd_len:
-            return wnds
+            return wnds, stats
+
+        if self.config.is_finetune and self.config.get_window_multiple() >= 1:
+            epoch_examples, epoch_stats = self._generate_epoch_aligned_window_sample(raw, montage, chs_idx, labels)
+            return epoch_examples, epoch_stats
 
         for label, start_t, end_t in labels:
             if self.config.is_finetune and label not in self.config.category:
@@ -578,16 +663,89 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
                 example_dicts.append(example_dict)
 
             wnds.extend(example_dicts)
-        return wnds
+            stats['possible_wnd_cnt'] += len(example_dicts)
+            stats['created_wnd_cnt'] += len(example_dicts)
+        return wnds, stats
+
+    def _generate_epoch_aligned_window_sample(
+            self,
+            raw: ndarray,
+            montage: str,
+            chs_idx: ndarray,
+            labels: list[tuple[str, int, int]],
+    ) -> tuple[list[dict[str, Any]], dict[str, int]]:
+        native_epoch_pts = int(self.config.fs) * int(self.config.native_epoch_sec)
+        window_multiple = self.config.get_window_multiple()
+        signal_len = raw.shape[1]
+        epoch_labels: list[tuple[int, int]] = []
+
+        for label, start_t, end_t in labels:
+            if label not in self.config.category:
+                continue
+
+            start = self._milli_sec_to_pts(start_t)
+            end = signal_len if end_t < 0 else self._milli_sec_to_pts(end_t)
+            if end > signal_len or start < 0 or start >= end:
+                continue
+
+            label_idx = self.config.category_query_dict[label]
+            native_epoch_count = max(0, (end - start) // native_epoch_pts)
+            for epoch_idx in range(native_epoch_count):
+                epoch_labels.append((start + epoch_idx * native_epoch_pts, label_idx))
+
+        base_dict = {
+            'chs': chs_idx,
+            'montage': f'{self.config.dataset_name}/{montage}',
+            'task': self.config.task_type.value,
+        }
+        examples: list[dict[str, Any]] = []
+        possible_wnd_cnt = 0
+
+        for start_idx in range(len(epoch_labels) - window_multiple + 1):
+            group = epoch_labels[start_idx:start_idx + window_multiple]
+            expected_start = group[0][0]
+            if any(epoch_start != expected_start + i * native_epoch_pts for i, (epoch_start, _) in enumerate(group)):
+                continue
+
+            possible_wnd_cnt += 1
+            label_idx = group[0][1]
+            if any(group_label != label_idx for _, group_label in group):
+                continue
+
+            wnd_start = expected_start
+            wnd_end = wnd_start + self.config.wnd_len
+            if wnd_end > signal_len:
+                continue
+
+            wnd_data = raw[:, wnd_start:wnd_end]
+            if wnd_data.shape[1] != self.config.wnd_len:
+                continue
+
+            example_dict = base_dict.copy()
+            example_dict['data'] = np.ascontiguousarray(wnd_data.flatten().astype(np.float32))
+            example_dict['label'] = label_idx
+            examples.append(example_dict)
+
+        stats = {
+            'possible_wnd_cnt': possible_wnd_cnt,
+            'created_wnd_cnt': len(examples),
+        }
+        return examples, stats
 
     def _mark_preproc_done(self):
         # Done marker is sampling rate specific
-        with open(os.path.join(self.summary_path, f'{self.config.name}_{self.config.get_fs_id()}.done'), 'w'):
+        with open(self._done_marker_path(), 'w'):
             pass
 
     def _is_preproc_cached(self):
         # Check done marker for specific sampling rate
-        return os.path.exists(os.path.join(self.summary_path, f'{self.config.name}_{self.config.get_fs_id()}.done'))
+        return os.path.exists(self._done_marker_path())
+
+    def _done_marker_path(self) -> str:
+        return os.path.join(
+            self.summary_path,
+            f'{self.dataset_name}_{self.config.name}_{self.config.get_fs_id()}.done',
+        )
 
     def _walk_raw_data_files(self):
         logger.info('Walking eeg data files...')

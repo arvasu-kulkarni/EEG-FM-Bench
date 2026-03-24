@@ -1,5 +1,5 @@
 import logging
-from typing import Type
+from typing import Optional, Type
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -7,7 +7,7 @@ from common.conf import BasePreprocArgs
 from common.log import setup_log
 from common.path import get_conf_file_path
 from data.processor.builder import EEGDatasetBuilder
-from data.processor.wrapper import DATASET_SELECTOR
+from data.processor.wrapper import resolve_dataset_request
 
 
 logger = logging.getLogger('preproc')
@@ -17,11 +17,12 @@ def prepare_dataset(
         conf: BasePreprocArgs,
         builder_cls: Type[EEGDatasetBuilder],
         dataset_name: str,
-        config_name: str
+        config_name: str,
+        config_overrides: Optional[dict[str, int | str]] = None,
 ):
     try:
         logger.info(f"Preparing dataset {dataset_name} {config_name} at fs={conf.fs}Hz...")
-        builder = builder_cls(config_name, fs=conf.fs)
+        builder = builder_cls(config_name, fs=conf.fs, **(config_overrides or {}))
         if conf.clean_middle_cache:
             builder.clean_disk_cache(clean_shared_info=conf.clean_shared_info)
         builder.preproc(n_proc=conf.num_preproc_mid_workers)
@@ -41,14 +42,14 @@ def preproc(conf: BasePreprocArgs):
     dataset_configs.extend(conf.finetune_datasets.values())
 
     for dataset, config in zip(dataset_names, dataset_configs):
-        if dataset not in DATASET_SELECTOR.keys():
-            raise ValueError(f"Dataset {dataset} is not supported.")
-
-        builder_cls = DATASET_SELECTOR[dataset]
+        try:
+            resolved_name, builder_cls, config_overrides = resolve_dataset_request(dataset)
+        except KeyError as exc:
+            raise ValueError(f"Dataset {dataset} is not supported.") from exc
         if config not in builder_cls.builder_configs.keys():
-            raise ValueError(f"Config {config} is not supported for dataset {dataset}.")
+            raise ValueError(f"Config {config} is not supported for dataset {resolved_name}.")
 
-        prepare_dataset(conf, builder_cls, dataset, config)
+        prepare_dataset(conf, builder_cls, dataset, config, config_overrides=config_overrides)
 
 
 if __name__ == '__main__':

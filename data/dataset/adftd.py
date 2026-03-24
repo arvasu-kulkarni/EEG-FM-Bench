@@ -61,6 +61,7 @@ class AdftdConfig(EEGConfig):
     valid_ratio: float = 0.15
     test_ratio: float = 0.15
     wnd_div_sec: int = 10
+    native_epoch_sec: int = 10
     suffix_path: str = '/share/data/raw/adftd/'
     scan_sub_dir: str = ""
 

@@ -22,6 +22,7 @@ from baseline.biot.biot_trainer import BiotTrainer
 from baseline.mantis import MantisConfig, MantisDataLoaderFactory, MantisTrainer
 from baseline.moment import MomentConfig, MomentDataLoaderFactory, MomentTrainer
 from baseline.manas import ManasConfig, ManasDataLoaderFactory, ManasTrainer
+from baseline.manas_long import ManasLongConfig, ManasLongDataLoaderFactory, ManasLongTrainer
 from baseline.reve.reve_adapter import ReveDataLoaderFactory
 from baseline.reve.reve_config import ReveConfig
 from baseline.reve.reve_trainer import ReveTrainer
@@ -109,3 +110,45 @@ ModelRegistry.register_model(
     adapter_class=ManasDataLoaderFactory,
     trainer_class=ManasTrainer
 )
+
+ModelRegistry.register_model(
+    model_type='manas-long',
+    config_class=ManasLongConfig,
+    adapter_class=ManasLongDataLoaderFactory,
+    trainer_class=ManasLongTrainer
+)
+
+__all__ = [
+    "ModelRegistry",
+    "CBraModConfig",
+    "CBraModDataLoaderFactory",
+    "CBraModTrainer",
+    "CSBrainConfig",
+    "CSBrainDataLoaderFactory",
+    "CSBrainTrainer",
+    "EegptConfig",
+    "EegptDataLoaderFactory",
+    "EegptTrainer",
+    "LabramConfig",
+    "LabramDataLoaderFactory",
+    "LabramTrainer",
+    "BendrConfig",
+    "BendrTrainer",
+    "BiotConfig",
+    "BiotTrainer",
+    "MantisConfig",
+    "MantisDataLoaderFactory",
+    "MantisTrainer",
+    "MomentConfig",
+    "MomentDataLoaderFactory",
+    "MomentTrainer",
+    "ManasConfig",
+    "ManasDataLoaderFactory",
+    "ManasTrainer",
+    "ManasLongConfig",
+    "ManasLongDataLoaderFactory",
+    "ManasLongTrainer",
+    "ReveConfig",
+    "ReveDataLoaderFactory",
+    "ReveTrainer",
+]

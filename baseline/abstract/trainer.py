@@ -128,6 +128,52 @@ class AbstractTrainer(ABC):
             'eval': {},
             'test': {},
         }
+        # Best full-epoch metrics selected by validation balanced accuracy
+        # Structure mirrors latest_epoch_metrics, but values correspond to the
+        # epoch with the best validation balanced accuracy seen so far.
+        self.best_epoch_metrics: Dict[str, Dict[str, Dict[str, float]]] = {
+            'eval': {},
+            'test': {},
+        }
+
+    def _reset_epoch_metric_trackers(self):
+        self.latest_epoch_metrics = {
+            'eval': {},
+            'test': {},
+        }
+        self.best_epoch_metrics = {
+            'eval': {},
+            'test': {},
+        }
+
+    def _update_best_epoch_metrics(self):
+        if not get_is_master():
+            return
+
+        for ds_name in self.ds_info.keys():
+            eval_metrics = self.latest_epoch_metrics.get('eval', {}).get(ds_name)
+            test_metrics = self.latest_epoch_metrics.get('test', {}).get(ds_name)
+            if not eval_metrics or not test_metrics:
+                continue
+
+            current_balanced_acc = eval_metrics.get('balanced_acc')
+            if current_balanced_acc is None:
+                logger.warning(
+                    f"Validation balanced_acc missing for dataset {ds_name}; "
+                    "falling back to last-epoch metrics for repetition summary."
+                )
+                continue
+
+            best_eval_metrics = self.best_epoch_metrics.get('eval', {}).get(ds_name)
+            best_balanced_acc = None if best_eval_metrics is None else best_eval_metrics.get('balanced_acc')
+
+            if best_balanced_acc is None or current_balanced_acc > best_balanced_acc:
+                self.best_epoch_metrics['eval'][ds_name] = deepcopy(eval_metrics)
+                self.best_epoch_metrics['test'][ds_name] = deepcopy(test_metrics)
+                logger.info(
+                    f"{ds_name}: updated best checkpoint selection to epoch {int(eval_metrics['epoch'])} "
+                    f"(val balanced_acc={current_balanced_acc:.4f})"
+                )
 
     def _resolve_num_repetitions(self) -> int:
         repetition = int(getattr(self.cfg, 'repetition', 1))
@@ -172,8 +218,14 @@ class AbstractTrainer(ABC):
         repetition_results.setdefault(ds_name, []).append({
             'repetition': self.current_repetition,
             'seed': seed,
-            'eval': deepcopy(self.latest_epoch_metrics.get('eval', {}).get(ds_name, {})),
-            'test': deepcopy(self.latest_epoch_metrics.get('test', {}).get(ds_name, {})),
+            'eval': deepcopy(
+                self.best_epoch_metrics.get('eval', {}).get(ds_name)
+                or self.latest_epoch_metrics.get('eval', {}).get(ds_name, {})
+            ),
+            'test': deepcopy(
+                self.best_epoch_metrics.get('test', {}).get(ds_name)
+                or self.latest_epoch_metrics.get('test', {}).get(ds_name, {})
+            ),
         })
 
     def _log_repetition_summary(self, repetition_results: Dict[str, List[Dict[str, Any]]], split: str = 'test'):
@@ -1549,6 +1601,7 @@ class AbstractTrainer(ABC):
                 )
 
             self.collect_dataset_info(mixed=True)
+            self._reset_epoch_metric_trackers()
             model = self.setup_model()
 
             train_loader, train_sampler = self.create_dataloader(datasets.Split.TRAIN)
@@ -1574,6 +1627,7 @@ class AbstractTrainer(ABC):
 
                 self.eval_epoch(valid_loaders, 'eval')
                 self.eval_epoch(test_loaders, 'test')
+                self._update_best_epoch_metrics()
 
             self.save_checkpoint(is_milestone=True)
 
@@ -1617,6 +1671,7 @@ class AbstractTrainer(ABC):
                     )
 
                 self.collect_dataset_info(mixed=False, ds_name=ds_name)
+                self._reset_epoch_metric_trackers()
                 model = self.setup_model()
 
                 train_loader, train_sampler = self.create_single_dataloader(ds_name, ds_config, datasets.Split.TRAIN)
@@ -1647,6 +1702,7 @@ class AbstractTrainer(ABC):
 
                     self.eval_epoch([valid_loader], 'eval')
                     self.eval_epoch([test_loader], 'test')
+                    self._update_best_epoch_metrics()
 
                 self.save_checkpoint(ds_name, is_milestone=True)
                 self._append_repetition_metrics(repetition_results, ds_name=ds_name, seed=ds_seed)

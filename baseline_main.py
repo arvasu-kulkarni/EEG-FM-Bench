@@ -17,6 +17,7 @@ import sys
 
 from omegaconf import OmegaConf
 
+import baseline  # noqa: F401 - trigger model registry side effects
 from baseline.abstract.factory import ModelRegistry
 from common.path import get_conf_file_path
 from common.utils import setup_yaml

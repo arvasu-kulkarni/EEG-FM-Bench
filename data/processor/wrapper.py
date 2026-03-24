@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Type, Optional
 
 import torch
@@ -49,6 +50,8 @@ from data.processor.builder import EEGDatasetBuilder, EEGConfig
 
 log = logging.getLogger()
 
+WINDOW_ALIAS_PATTERN = re.compile(r"^(?P<base>hmc|adftd)_(?P<window_sec>\d+)(?:s)?$")
+
 
 DATASET_SELECTOR: dict[str, Type[EEGDatasetBuilder]] = {
     'tuab': TuabBuilder,
@@ -90,9 +93,27 @@ DATASET_SELECTOR: dict[str, Type[EEGDatasetBuilder]] = {
     'epilepsy_pnes_20s': EpilepsyPnes20sBuilder,
 }
 
+
+def resolve_dataset_request(dataset_name: str) -> tuple[str, Type[EEGDatasetBuilder], dict[str, int | str]]:
+    if dataset_name in DATASET_SELECTOR:
+        return dataset_name, DATASET_SELECTOR[dataset_name], {}
+
+    match = WINDOW_ALIAS_PATTERN.fullmatch(dataset_name)
+    if match is None:
+        raise KeyError(dataset_name)
+
+    base_name = match.group('base')
+    window_sec = int(match.group('window_sec'))
+    builder_cls = DATASET_SELECTOR[base_name]
+    return dataset_name, builder_cls, {
+        'dataset_name': dataset_name,
+        'wnd_div_sec': window_sec,
+    }
+
 def get_dataset_patch_len(dataset_name: str, config_name: str) -> int:
-    config: EEGConfig = DATASET_SELECTOR[dataset_name].builder_configs.get(config_name)
-    return config.wnd_div_sec
+    _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
+    builder = builder_cls(config_name=config_name, **config_overrides)
+    return builder.config.wnd_div_sec
 
 
 def get_dataset_shape_info(dataset_name: str, config_name: str, fs: int) -> dict[str, tuple[int, int]]:
@@ -107,15 +128,15 @@ def get_dataset_shape_info(dataset_name: str, config_name: str, fs: int) -> dict
     Returns:
         Dict mapping montage_key -> (n_timepoints, n_channels)
     """
-    builder_cls = DATASET_SELECTOR[dataset_name]
-    builder: EEGDatasetBuilder = builder_cls(config_name=config_name)
+    resolved_name, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
+    builder: EEGDatasetBuilder = builder_cls(config_name=config_name, **config_overrides)
 
     config: EEGConfig = builder.config
     n_timepoints = int(config.wnd_div_sec * fs)
 
     shape_info: dict[str, tuple[int, int]] = {}
     for montage_name in config.montage.keys():
-        montage_key = f'{dataset_name}/{montage_name}'
+        montage_key = f'{resolved_name}/{montage_name}'
         chs = builder.standardize_chs_names(montage_name)
         n_channels = len(chs)
         shape_info[montage_key] = (n_timepoints, n_channels)
@@ -124,22 +145,24 @@ def get_dataset_shape_info(dataset_name: str, config_name: str, fs: int) -> dict
 
 
 def get_dataset_n_class(dataset_name: str, config_name: str) -> int:
-    config: EEGConfig = DATASET_SELECTOR[dataset_name].builder_configs.get(config_name)
-    return len(config.category)
+    _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
+    builder = builder_cls(config_name=config_name, **config_overrides)
+    return len(builder.config.category)
 
 def get_dataset_category(dataset_name: str, config_name: str) -> list[str]:
-    config: EEGConfig = DATASET_SELECTOR[dataset_name].builder_configs.get(config_name)
-    return config.category
+    _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
+    builder = builder_cls(config_name=config_name, **config_overrides)
+    return builder.config.category
 
 def get_dataset_montage(dataset_name: str, config_name: str) -> dict[str, list[str]]:
     # Note: This function needs builder instance to call standardize_chs_names()
-    builder_cls = DATASET_SELECTOR[dataset_name]
-    builder: EEGDatasetBuilder = builder_cls(config_name=config_name)
+    resolved_name, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
+    builder: EEGDatasetBuilder = builder_cls(config_name=config_name, **config_overrides)
     montage_names = builder.config.montage.keys()
 
     montages: dict[str, list[str]] = dict()
     for montage_name in montage_names:
-        montages[f'{dataset_name}/{montage_name}'] = builder.standardize_chs_names(montage_name)
+        montages[f'{resolved_name}/{montage_name}'] = builder.standardize_chs_names(montage_name)
 
     return montages
 
@@ -173,8 +196,8 @@ def load_concat_eeg_datasets(
 
     for ds_name, ds_config in zip(dataset_names, builder_configs):
         try:
-            builder_cls = DATASET_SELECTOR[ds_name]
-            builder = builder_cls(config_name=ds_config, fs=fs)
+            _, builder_cls, config_overrides = resolve_dataset_request(ds_name)
+            builder = builder_cls(config_name=ds_config, fs=fs, **config_overrides)
             log.info(f'Loading {ds_name}-{ds_config} at fs={fs}Hz from {builder.cache_dir}')
             # noinspection PyTypeChecker
             dataset: Dataset = builder.as_dataset(split=split)
@@ -228,4 +251,3 @@ if __name__ == '__main__':
 
     for batch in loader:
         pass
-

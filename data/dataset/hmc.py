@@ -58,6 +58,7 @@ class HMCConfig(EEGConfig):
     valid_ratio: float = 0.162
     test_ratio: float = 0.162
     wnd_div_sec: int = 30
+    native_epoch_sec: int = 30
     suffix_path: str = "/share/data/raw/physionet.org/files/hmc-sleep-staging/1.1/"
     scan_sub_dir: str = "recordings"
 
