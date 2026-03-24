@@ -6,6 +6,7 @@ seed: 42
 master_port: 51103
 multitask: false
 model_type: 'eegpt'
+fs: 200
 
 # Data configuration
 data:

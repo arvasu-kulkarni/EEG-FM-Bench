@@ -11,20 +11,24 @@ fs: 200
 
 # Data configuration
 data:
-  batch_size: 4
-  num_workers: 16
-  # Position source for MANAS adapter:
-  # true  -> legacy MNE montage generation
-  # false -> load from positions_json_path (fallback to MNE if channels are missing)
-  use_legacy_mne_positions: false
-  positions_json_path: "./positions.json"
-  # datasets:
-  #   motor_mv_img: 'finetune'
-  #   workload: 'finetune'
-  #   hmc: 'finetune'
-  #   siena_scalp: 'finetune'
-  #   adftd: 'finetune'
-  #   bcic_2a: 'finetune'
+  batch_size: 32
+  num_workers: 2
+  datasets:
+    # seed: 'finetune'
+    # motor_mv_img: 'finetune'
+    # workload: 'finetune'
+    # tuev: 'finetune'
+    # tuab: 'finetune'
+    # hmc: 'finetune'
+    # siena_scalp: 'finetune'
+    # tusl: 'finetune'
+    # mimul_11: 'finetune'
+    # things_eeg_2: 'finetune'
+    # seed_v: 'finetune'
+    # adftd: 'finetune'
+    # bcic_2a: 'finetune'
+    # seed_vii: 'finetune'
+    epilepsy_pnes_20s: 'finetune'
 
 # MANAS model configuration
 model:
@@ -64,7 +68,7 @@ model:
 
   # Classifier head configuration
   classifier_head:
-    head_type: 'flatten_mlp'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
+    head_type: 'avg_pool'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
 
     # Common parameters
     hidden_dims: [128]
@@ -98,7 +102,7 @@ training:
 
   # Training options
   use_amp: true
-  train_method: "linear_probe"  # Options: linear_probe, partial_ft, full_ft
+  train_method: "full_ft"  # Options: linear_probe, partial_ft, full_ft
   dual_stage: false             # If true: first N/2 epochs linear_probe, then train_method
 
   # LoRA configuration
