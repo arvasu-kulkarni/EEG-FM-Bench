@@ -193,7 +193,7 @@ class ManasLongTrainer(AbstractTrainer):
                 "MANAS-Long checkpoint did not contain any encoder-side keys matching the downstream backbone."
             )
 
-        missing, unexpected = self.encoder.mae.load_state_dict(filtered, strict=False)
+        missing, unexpected = self.encoder.mae.load_state_dict(filtered, strict=True)
         if unexpected:
             raise RuntimeError(
                 "MANAS-Long checkpoint load produced unexpected keys after filtering: "

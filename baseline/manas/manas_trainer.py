@@ -204,7 +204,7 @@ class ManasTrainer(AbstractTrainer):
                 f"stripped 'mae.' from {stripped_prefix_count} keys."
             )
 
-        missing, unexpected = self.encoder.mae.load_state_dict(remapped, strict=False)
+        missing, unexpected = self.encoder.mae.load_state_dict(remapped, strict=True)
         if missing or unexpected:
             raise RuntimeError(
                 "MANAS checkpoint is incompatible with current encoder architecture. "

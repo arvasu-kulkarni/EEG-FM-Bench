@@ -6,7 +6,7 @@ seed: 42
 repetition: 1
 master_port: 51231
 multitask: false
-model_type: 'manas-long'
+model_type: 'manas'
 fs: 200
 
 # Data configuration
@@ -33,16 +33,19 @@ data:
 # MANAS model configuration
 model:
   # Pretrained weights
-  pretrained_path: '/share/arvasunewtemp/longv0/2026-03-23_14-45-47/mae_epoch_34.pt'
-  mae_type: 'mahir'
+  pretrained_path: '/share/tmp/arvasundx/ckpt/longv0control/mae_epoch_24.pt'
+  # longv0control was trained with the Mahir MAE variant.
+  mae_type: 'mahir'  # default: 'default'; options: default, mahir
 
   # Architecture parameters
   patch_seconds: 1.0
   overlap_seconds: 0.1
   embed_dim: 512
-  encoder_depth: 12
+  # longv0control checkpoint expects a 22-layer encoder.
+  encoder_depth: 22  # default: 12
   encoder_heads: 8
-  decoder_depth: 4
+  # longv0control checkpoint expects a 5-layer decoder.
+  decoder_depth: 5  # default: 4
   decoder_heads: 8
   mask_ratio: 0.55
   aux_loss_weight: 0.1
@@ -120,7 +123,7 @@ training:
 # Logging configuration
 logging:
   experiment_name: "manas"
-  run_dir: "/share/tmp/arvasundx/eval/longv0"
+  run_dir: "/share/tmp/arvasundx/eval/longv0-control"
 
   # Cloud logging
   use_cloud: true
@@ -128,7 +131,7 @@ logging:
 
   project: "manas"
   tags:
-    - "manas-longv0"
+    - "manas-longv0-control"
     - "separated"
     - "full_ft"
     - "flatten_mlp"
