@@ -170,7 +170,7 @@ class Classifier(DN3BaseModel):
         if not include_classifier:
             for key in [k for k in state_dict.keys() if 'classifier' in k]:
                 state_dict.pop(key)
-        self.load_state_dict(state_dict, strict=False)
+        self.load_state_dict(state_dict, strict=True)
         if freeze_features:
             self.freeze_features()
 
@@ -444,5 +444,4 @@ class BENDRClassifier(Classifier):
         x = self.encoder(x)
         x = self.contextualizer(x)
         return x[0]
-
 

@@ -118,6 +118,20 @@ ModelRegistry.register_model(
     trainer_class=ManasLongTrainer
 )
 
+ModelRegistry.register_model(
+    model_type='manas-long-v0.1',
+    config_class=ManasLongConfig,
+    adapter_class=ManasLongDataLoaderFactory,
+    trainer_class=ManasLongTrainer
+)
+
+ModelRegistry.register_model(
+    model_type='manas-long-v0.2',
+    config_class=ManasLongConfig,
+    adapter_class=ManasLongDataLoaderFactory,
+    trainer_class=ManasLongTrainer
+)
+
 __all__ = [
     "ModelRegistry",
     "CBraModConfig",

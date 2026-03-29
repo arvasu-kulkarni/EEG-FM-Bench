@@ -58,7 +58,7 @@ class TVector(Classifier):
         if not include_classifier:
             for key in [k for k in state_dict.keys() if 'classifier' in k]:
                 state_dict.pop(key)
-        self.load_state_dict(state_dict, strict=False)
+        self.load_state_dict(state_dict, strict=True)
         self.freeze_features(unfreeze=not freeze_features)
 
     def save(self, filename, ignore_classifier=True):
@@ -152,4 +152,3 @@ class TVectorConcatenation(InstanceTransform):
 
     def new_channels(self, old_channels):
         return old_channels + ['T-vectors-{}'.format(i+1) for i in range(self.tvect.num_features_for_classification)]
-

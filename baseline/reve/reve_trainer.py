@@ -170,7 +170,7 @@ class ReveTrainer(AbstractTrainer):
         # Load encoder checkpoint
         ckpt = self.load_safetensor(checkpoint_path, self.device)
         if ckpt is not None:
-            missing, unexpected = self.encoder.load_state_dict(ckpt, strict=False)
+            missing, unexpected = self.encoder.load_state_dict(ckpt, strict=True)
             missing_keys += missing
             unexpected_keys += unexpected
 

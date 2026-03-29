@@ -191,7 +191,7 @@ class BiotTrainer(AbstractTrainer):
 
         pretrain_ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
-        missing_keys, unexpected_keys = self.encoder.load_state_dict(pretrain_ckpt, strict=False)
+        missing_keys, unexpected_keys = self.encoder.load_state_dict(pretrain_ckpt, strict=True)
 
         if missing_keys:
             logger.warning(f"Missing keys when loading checkpoint: {missing_keys}")

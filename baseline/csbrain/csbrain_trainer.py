@@ -191,7 +191,7 @@ class CSBrainTrainer(AbstractTrainer):
         checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         if any(key.startswith('module.') for key in checkpoint.keys()):
             checkpoint = {key.replace('module.', ''): value for key, value in checkpoint.items()}
-        missing, unexpected = self.encoder.load_state_dict(checkpoint, strict=False)
+        missing, unexpected = self.encoder.load_state_dict(checkpoint, strict=True)
         
         if missing:
             logger.warning(f"Missing keys when loading checkpoint: {missing}")

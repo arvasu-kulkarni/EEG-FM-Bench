@@ -1478,7 +1478,7 @@ class AbstractTrainer(ABC):
         lora_state_dict = torch.load(lora_checkpoint_path, map_location=self.device, weights_only=True)
         
         missing_keys, unexpected_keys = load_lora_state_dict(
-            self.model, lora_state_dict, strict=False
+            self.model, lora_state_dict, strict=True
         )
         
         if missing_keys:
