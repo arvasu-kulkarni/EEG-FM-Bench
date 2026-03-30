@@ -1,0 +1,94 @@
+seed: 42
+repetition: 1
+master_port: 51231
+multitask: false
+model_type: "manas-long-v0.1"
+fs: 200
+
+data:
+  batch_size: 32
+  num_workers: 16
+  datasets:
+    hmc: "finetune"
+    hmc_60: "finetune"
+    hmc_90: "finetune"
+    siena_scalp: "finetune"
+    adftd: "finetune"
+    adftd_30: "finetune"
+
+model:
+  pretrained_path: "/share/arvasunewtemp/longv0.1/2026-03-26_04-13-58/mae_epoch_20.pt"
+  mae_type: "mahir"
+  patch_seconds: 1.0
+  overlap_seconds: 0.1
+  embed_dim: 1024
+  encoder_depth: 22
+  encoder_heads: 8
+  decoder_depth: 5
+  decoder_heads: 8
+  mask_ratio: 0.55
+  aux_loss_weight: 0.1
+  which_mask: "default"
+  fuzzy_noise_std: 0.1
+  spatial_radius_black: 3.0
+  spatial_radius_fuzzy: 4.0
+  temporal_radius_black: 3.0
+  temporal_radius_fuzzy: 4.0
+  dropout_ratio: 0.1
+  dropout_radius: 3.0
+  ema_mix_ratio: 0.6
+  ema_temperature: 2.0
+  ema_floor_eps: 0.1
+  use_pairwise_channel_diffs: false
+  pairwise_exclude_datasets: []
+  n_spatial_coords: 3
+  posenc_n_freqs: 4
+  classifier_head:
+    head_type: "attention_pool"
+    hidden_dims: [128]
+    dropout: 0.3
+    attn_n_head: 4
+    attn_head_dim: 64
+    fusion_mode: "dual"
+    fusion_n_head: 4
+    fusion_head_dim: 64
+    fusion_use_rope: true
+    fusion_rope_theta: 10000.0
+    fusion_max_seq_len: 1024
+
+training:
+  max_epochs: 20
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lr_schedule: "cosine"
+  max_lr: 2.0e-4
+  min_lr: 2.0e-5
+  warmup_epochs: 3
+  warmup_scale: 1e-1
+  encoder_lr_scale: 0.1
+  use_amp: true
+  train_method: "linear_probe"
+  dual_stage: false
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ["attn", "ffn.0", "ffn.2"]
+    lora_exclude_modules: null
+    lora_target_type: "full"
+    lora_scope: "full"
+    lora_lr_scale: 1.0
+
+logging:
+  experiment_name: "manas_v0p1_large_1024bs"
+  run_dir: "/share/arvasunewtemp/eval/manas_v0p1_large_1024bs"
+  use_cloud: true
+  cloud_backend: "wandb"
+  project: "manas"
+  tags:
+    - "manas-long-v0.1"
+    - "v0.1-large-1024bs"
+    - "attention_pool"
+  log_step_interval: 1
+  ckpt_interval: 1

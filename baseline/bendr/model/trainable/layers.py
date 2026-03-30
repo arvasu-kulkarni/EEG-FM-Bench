@@ -378,7 +378,7 @@ class EncodingAugment(nn.Module):
 
     def init_from_contextualizer(self, filename):
         state_dict = torch.load(filename)
-        self.load_state_dict(state_dict, strict=False)
+        self.load_state_dict(state_dict, strict=True)
         for param in self.parameters():
             param.requires_grad = False
         print("Initialized mask embedding and position encoder from ", filename)

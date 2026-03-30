@@ -1,0 +1,111 @@
+seed: 42
+repetition: 1
+master_port: 51231
+multitask: false
+model_type: "manas-long-v0.1"
+fs: 200
+
+data:
+  batch_size: 32
+  num_workers: 16
+  datasets:
+    hmc: "finetune"
+    hmc_60: "finetune"
+    hmc_90: "finetune"
+    siena_scalp: "finetune"
+    adftd: "finetune"
+    adftd_30: "finetune"
+
+model:
+  pretrained_path: "/share/mae_epoch_20.pt"
+  mae_type: "mahir"
+  patch_seconds: 1.0
+  overlap_seconds: 0.1
+  embed_dim: 1024
+  encoder_depth: 22
+  encoder_heads: 8
+  decoder_depth: 5
+  decoder_heads: 8
+  mask_ratio: 0.55
+  aux_loss_weight: 0.1
+  which_mask: "default"
+  fuzzy_noise_std: 0.1
+  spatial_radius_black: 3.0
+  spatial_radius_fuzzy: 4.0
+  temporal_radius_black: 3.0
+  temporal_radius_fuzzy: 4.0
+  dropout_ratio: 0.1
+  dropout_radius: 3.0
+  ema_mix_ratio: 0.6
+  ema_temperature: 2.0
+  ema_floor_eps: 0.1
+  use_pairwise_channel_diffs: false
+  pairwise_exclude_datasets: []
+  n_spatial_coords: 3
+  posenc_n_freqs: 4
+  use_memory_tokens: true
+  memory_scales_seconds: [5.0, 10.0, 30.0]
+  memory_active_scales_seconds: [5.0, 10.0, 30.0]
+  memory_attention_scales_seconds: [5.0, 10.0, 30.0]
+  memory_encoder_access_start_layers:
+    5.0: 16
+    10.0: 8
+    30.0: 1
+  memory_conv_kernel_sizes:
+    5.0: 400
+    10.0: 600
+    30.0: 800
+  memory_patch_conv_channels: 64
+  memory_token_dims:
+    5.0: 1024
+    10.0: 1024
+    30.0: 1024
+  classifier_head:
+    head_type: "attention_pool"
+    hidden_dims: [128]
+    dropout: 0.3
+    attn_n_head: 4
+    attn_head_dim: 64
+    fusion_mode: "dual"
+    fusion_n_head: 4
+    fusion_head_dim: 64
+    fusion_use_rope: true
+    fusion_rope_theta: 10000.0
+    fusion_max_seq_len: 1024
+
+training:
+  max_epochs: 20
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  lr_schedule: "cosine"
+  max_lr: 2.0e-4
+  min_lr: 2.0e-5
+  warmup_epochs: 3
+  warmup_scale: 1e-1
+  encoder_lr_scale: 0.1
+  use_amp: true
+  train_method: "linear_probe"
+  dual_stage: false
+  lora:
+    use_lora: false
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.0
+    lora_target_modules: ["attn", "ffn.0", "ffn.2"]
+    lora_exclude_modules: null
+    lora_target_type: "full"
+    lora_scope: "full"
+    lora_lr_scale: 1.0
+
+logging:
+  experiment_name: "manas_v0p1_encreverse"
+  run_dir: "/share/arvasunewtemp/eval/manas_v0p1_encreverse"
+  use_cloud: true
+  cloud_backend: "wandb"
+  project: "manas"
+  tags:
+    - "manas-long-v0.1"
+    - "v0.1-encreverse"
+    - "attention_pool"
+  log_step_interval: 1
+  ckpt_interval: 1

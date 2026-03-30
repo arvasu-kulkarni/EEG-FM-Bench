@@ -151,7 +151,7 @@ class CBraModTrainer(AbstractTrainer):
         logger.info(f"Loading pretrained weights from: {checkpoint_path}")
 
         pretrain_ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
-        missing_keys, unexpected_keys = self.encoder.load_state_dict(pretrain_ckpt, strict=False)
+        missing_keys, unexpected_keys = self.encoder.load_state_dict(pretrain_ckpt, strict=True)
 
         if missing_keys:
             logger.warning(f"Missing keys in pretrained weights: {missing_keys}")

@@ -6,7 +6,7 @@ PLATFORM = os.getenv('EEGFM_PLATFORM', 'local')
 
 PROJECT_ROOT = os.getenv('EEGFM_PROJECT_ROOT', os.getcwd())
 ASSETS_ROOT = os.path.join(PROJECT_ROOT, 'assets')
-RUN_ROOT = os.getenv('RUN_ROOT', '/share/tmp/arvasundx/eegfmbench/run')
+RUN_ROOT = os.getenv('RUN_ROOT', '/share/arvasunewtemp/eegfmbench/run')
 LOG_ROOT = os.path.join(RUN_ROOT, 'log')
 CONF_ROOT = os.getenv('EEGFM_CONF_ROOT', os.path.join(ASSETS_ROOT, 'conf'))
 

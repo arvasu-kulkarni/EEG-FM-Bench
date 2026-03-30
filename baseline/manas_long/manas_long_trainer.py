@@ -187,6 +187,11 @@ class ManasLongTrainer(AbstractTrainer):
 
         encoder_state = self.encoder.mae.state_dict()
         filtered = {key: value for key, value in remapped.items() if key in encoder_state}
+        skipped = sorted(key for key in remapped if key not in encoder_state)
+        if skipped:
+            logger.warning("MANAS-Long checkpoint keys skipped before strict load:")
+            for key in skipped:
+                logger.warning(f"  SKIPPED: {key}")
 
         if not filtered:
             raise RuntimeError(
@@ -194,7 +199,14 @@ class ManasLongTrainer(AbstractTrainer):
             )
 
         missing, unexpected = self.encoder.mae.load_state_dict(filtered, strict=True)
+        if missing:
+            logger.error("MANAS-Long encoder missing keys after strict load:")
+            for key in sorted(missing):
+                logger.error(f"  MISSING: {key}")
         if unexpected:
+            logger.error("MANAS-Long encoder unexpected keys after strict load:")
+            for key in sorted(unexpected):
+                logger.error(f"  UNEXPECTED: {key}")
             raise RuntimeError(
                 "MANAS-Long checkpoint load produced unexpected keys after filtering: "
                 f"{unexpected}"

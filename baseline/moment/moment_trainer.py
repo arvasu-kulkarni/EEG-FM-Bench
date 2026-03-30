@@ -236,7 +236,7 @@ class MomentTrainer(AbstractTrainer):
         logger.info(f"Loading pretrained weights from local: {checkpoint_path}")
         checkpoint = safetensors.torch.load_file(checkpoint_path)
 
-        missing, unexpected = self.encoder.moment.load_state_dict(checkpoint, strict=False)
+        missing, unexpected = self.encoder.moment.load_state_dict(checkpoint, strict=True)
 
         if missing:
             logger.warning(f"Missing keys when loading checkpoint: {missing}")

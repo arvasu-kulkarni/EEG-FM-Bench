@@ -189,7 +189,7 @@ class LabramTrainer(AbstractTrainer):
 
         # Load weights into encoder
         if self.encoder is not None:
-            missing_keys, unexpected_keys = self.encoder.load_state_dict(encoder_state_dict, strict=False)
+            missing_keys, unexpected_keys = self.encoder.load_state_dict(encoder_state_dict, strict=True)
         else:
             missing_keys, unexpected_keys = [], []
         

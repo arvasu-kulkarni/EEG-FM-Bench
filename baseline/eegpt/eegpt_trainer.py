@@ -195,7 +195,7 @@ class EegptTrainer(AbstractTrainer):
 
         # Load weights
         if target_encoder_state and self.target_encoder is not None:
-            missing_keys, unexpected_keys = self.target_encoder.load_state_dict(target_encoder_state, strict=False)
+            missing_keys, unexpected_keys = self.target_encoder.load_state_dict(target_encoder_state, strict=True)
             if missing_keys:
                 logger.warning(f"Missing keys in pretrained weights: {missing_keys}")
             if unexpected_keys:
