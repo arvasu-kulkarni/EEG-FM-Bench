@@ -23,6 +23,16 @@ from baseline.mantis import MantisConfig, MantisDataLoaderFactory, MantisTrainer
 from baseline.moment import MomentConfig, MomentDataLoaderFactory, MomentTrainer
 from baseline.manas import ManasConfig, ManasDataLoaderFactory, ManasTrainer
 from baseline.manas_long import ManasLongConfig, ManasLongDataLoaderFactory, ManasLongTrainer
+from baseline.manas_long_v0_1 import (
+    ManasLongV01Config,
+    ManasLongV01DataLoaderFactory,
+    ManasLongV01Trainer,
+)
+from baseline.manas_long_v0_2 import (
+    ManasLongV02Config,
+    ManasLongV02DataLoaderFactory,
+    ManasLongV02Trainer,
+)
 from baseline.reve.reve_adapter import ReveDataLoaderFactory
 from baseline.reve.reve_config import ReveConfig
 from baseline.reve.reve_trainer import ReveTrainer
@@ -120,16 +130,16 @@ ModelRegistry.register_model(
 
 ModelRegistry.register_model(
     model_type='manas-long-v0.1',
-    config_class=ManasLongConfig,
-    adapter_class=ManasLongDataLoaderFactory,
-    trainer_class=ManasLongTrainer
+    config_class=ManasLongV01Config,
+    adapter_class=ManasLongV01DataLoaderFactory,
+    trainer_class=ManasLongV01Trainer
 )
 
 ModelRegistry.register_model(
     model_type='manas-long-v0.2',
-    config_class=ManasLongConfig,
-    adapter_class=ManasLongDataLoaderFactory,
-    trainer_class=ManasLongTrainer
+    config_class=ManasLongV02Config,
+    adapter_class=ManasLongV02DataLoaderFactory,
+    trainer_class=ManasLongV02Trainer
 )
 
 __all__ = [
@@ -162,6 +172,12 @@ __all__ = [
     "ManasLongConfig",
     "ManasLongDataLoaderFactory",
     "ManasLongTrainer",
+    "ManasLongV01Config",
+    "ManasLongV01DataLoaderFactory",
+    "ManasLongV01Trainer",
+    "ManasLongV02Config",
+    "ManasLongV02DataLoaderFactory",
+    "ManasLongV02Trainer",
     "ReveConfig",
     "ReveDataLoaderFactory",
     "ReveTrainer",

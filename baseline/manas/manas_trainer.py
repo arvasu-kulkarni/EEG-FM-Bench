@@ -205,6 +205,14 @@ class ManasTrainer(AbstractTrainer):
             )
 
         missing, unexpected = self.encoder.mae.load_state_dict(remapped, strict=True)
+        if missing:
+            logger.error("MANAS checkpoint missing keys:")
+            for key in sorted(missing):
+                logger.error(f"  MISSING: {key}")
+        if unexpected:
+            logger.error("MANAS checkpoint unexpected keys:")
+            for key in sorted(unexpected):
+                logger.error(f"  SKIPPED/UNEXPECTED: {key}")
         if missing or unexpected:
             raise RuntimeError(
                 "MANAS checkpoint is incompatible with current encoder architecture. "
