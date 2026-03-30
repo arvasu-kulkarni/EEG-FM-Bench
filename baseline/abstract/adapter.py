@@ -124,6 +124,7 @@ class AbstractDatasetAdapter(Dataset, ABC):
             'chans_id': chans_id,
             'task': task,
             'label': sample['label'],
+            'subject': sample['subject'],
         }
         
         return result

@@ -12,7 +12,13 @@ from pydantic import Field
 
 from baseline.abstract.config import AbstractConfig, BaseDataArgs, BaseModelArgs, BaseTrainingArgs, BaseLoggingArgs
 from baseline.abstract.trainer import AbstractTrainer, format_console_log_dict
-from data.processor.wrapper import get_dataset_montage, get_dataset_n_class, get_dataset_category, get_dataset_patch_len
+from data.processor.wrapper import (
+    get_dataset_montage,
+    get_dataset_n_class,
+    get_dataset_category,
+    get_dataset_eval_info,
+    get_dataset_patch_len,
+)
 from common.distributed.env import get_is_master
 from common.distributed.loader import DistributedGroupBatchSampler
 
@@ -121,6 +127,7 @@ class ClassicalTrainer(AbstractTrainer, ABC):
                 'n_class': get_dataset_n_class(ds_name, ds_conf),
                 'n_ch': len(montage),
                 'category': get_dataset_category(ds_name, ds_conf),
+                'eval': get_dataset_eval_info(ds_name, ds_conf),
                 'wnd_sec': get_dataset_patch_len(ds_name, ds_conf),
             }}
         logger.info(f"Dataset {ds_name} - {ds_conf} only")

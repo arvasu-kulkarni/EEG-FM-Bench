@@ -154,6 +154,14 @@ def get_dataset_category(dataset_name: str, config_name: str) -> list[str]:
     builder = builder_cls(config_name=config_name, **config_overrides)
     return builder.config.category
 
+def get_dataset_eval_info(dataset_name: str, config_name: str) -> dict[str, bool | str]:
+    _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
+    builder = builder_cls(config_name=config_name, **config_overrides)
+    return {
+        'aggregate_by_subject': builder.config.eval_aggregate_by_subject,
+        'subject_score_aggregation': builder.config.subject_score_aggregation,
+    }
+
 def get_dataset_montage(dataset_name: str, config_name: str) -> dict[str, list[str]]:
     # Note: This function needs builder instance to call standardize_chs_names()
     resolved_name, builder_cls, config_overrides = resolve_dataset_request(dataset_name)

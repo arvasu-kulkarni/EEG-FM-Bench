@@ -75,6 +75,14 @@ class EpilepsyPnes20sBuilder(EEGDatasetBuilder):
     BUILDER_CONFIGS = [
         BUILDER_CONFIG_CLASS(name="pretrain"),
         BUILDER_CONFIG_CLASS(name="finetune", is_finetune=True),
+        BUILDER_CONFIG_CLASS(
+            name="finetune_subject",
+            is_finetune=True,
+            train_subjects_per_class=72,
+            valid_subjects_per_class=8,
+            test_subjects_per_class=20,
+            eval_aggregate_by_subject=True,
+        ),
     ]
 
     def __init__(self, config_name="pretrain", **kwargs):

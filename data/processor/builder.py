@@ -103,6 +103,8 @@ class EEGConfig(BuilderConfig):
     # finetune conf
     is_finetune: bool = False
     category: list[str] = field(default_factory=lambda: [])
+    eval_aggregate_by_subject: bool = False
+    subject_score_aggregation: str = "mean_logits"
 
     def __post_init__(self):
         super().__post_init__()
@@ -124,6 +126,12 @@ class EEGConfig(BuilderConfig):
 
         if self.database_cache_root.startswith('s3://'):
             self.is_remote_fs = True
+
+        if self.subject_score_aggregation not in {"mean_logits"}:
+            raise ValueError(
+                f"{self.dataset_name}/{self.name}: unsupported subject_score_aggregation="
+                f"{self.subject_score_aggregation!r}."
+            )
 
     def get_fs_id(self) -> str:
         return f"fs_{int(self.fs)}"

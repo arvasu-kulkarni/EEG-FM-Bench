@@ -27,7 +27,12 @@ from baseline.utils.lora import (
 )
 from baseline.utils.common import seed_torch
 from common.log import setup_log
-from data.processor.wrapper import get_dataset_n_class, get_dataset_category, get_dataset_shape_info
+from data.processor.wrapper import (
+    get_dataset_n_class,
+    get_dataset_category,
+    get_dataset_eval_info,
+    get_dataset_shape_info,
+)
 from common.distributed.env import get_is_master, get_global_rank, get_local_rank, get_world_size, get_master_addr, \
     get_master_port, get_specific_dirname, clean_torch_distributed
 from common.distributed.loader import DistributedGroupBatchSampler
@@ -544,7 +549,8 @@ class AbstractTrainer(ABC):
 
         # Add raw confusion matrix data for cloud logging backends
         for ds_name in ds_metric.keys():
-            matrix = ds_metric[ds_name]['cm'].cpu().numpy()
+            matrix_tensor = ds_metric[ds_name].get('cm_metric', ds_metric[ds_name]['cm'])
+            matrix = matrix_tensor.cpu().numpy()
             labels = self.ds_info[ds_name]['category']
 
             # Store raw matrix and labels for both wandb and comet to handle
@@ -693,6 +699,7 @@ class AbstractTrainer(ABC):
                     'config': dataset_config,
                     'n_class': get_dataset_n_class(dataset_name, dataset_config),
                     'category': get_dataset_category(dataset_name, dataset_config),
+                    'eval': get_dataset_eval_info(dataset_name, dataset_config),
                     'shape_info': get_dataset_shape_info(dataset_name, dataset_config, self.cfg.fs),
                 }
                 logger.info(f"Dataset {dataset_name} - {dataset_config} for mixed set")
@@ -703,6 +710,7 @@ class AbstractTrainer(ABC):
                     'config': ds_conf,
                     'n_class': get_dataset_n_class(ds_name, ds_conf),
                     'category': get_dataset_category(ds_name, ds_conf),
+                    'eval': get_dataset_eval_info(ds_name, ds_conf),
                     'shape_info': get_dataset_shape_info(ds_name, ds_conf, self.cfg.fs),
                 }}
             logger.info(f"Dataset {ds_name} - {ds_conf} only")
@@ -729,15 +737,78 @@ class AbstractTrainer(ABC):
 
         return gather_list
 
-    def _gather_result(self, logits: Tensor, targets: Tensor) -> tuple[Optional[Tensor], Optional[Tensor]]:
+    def _gather_objects(self, values: list[Any]) -> Optional[list[Any]]:
+        is_dist = torch.distributed.is_available() and torch.distributed.is_initialized()
+        if not is_dist:
+            return list(values)
+
+        gather_list = [None for _ in range(self.world_size)] if get_is_master() else None
+        torch.distributed.gather_object(values, object_gather_list=gather_list, dst=0)
+
+        if get_is_master():
+            merged: list[Any] = []
+            for items in gather_list:
+                if items is None:
+                    continue
+                merged.extend(items)
+            return merged
+        return None
+
+    def _gather_result(
+            self,
+            logits: Tensor,
+            targets: Tensor,
+            subjects: Optional[list[str]] = None,
+    ) -> tuple[Optional[Tensor], Optional[Tensor], Optional[list[str]]]:
         logits_list = self._gather_tensor(logits, self.cfg.data.batch_size)
         target_list = self._gather_tensor(targets, self.cfg.data.batch_size)
+        subject_list = self._gather_objects(subjects) if subjects is not None else None
 
         if get_is_master():
             all_logits = torch.cat(logits_list, dim=0)
             all_target = torch.cat(target_list, dim=0)
-            return all_logits.cpu(), all_target.cpu()
-        return None, None
+            return all_logits.cpu(), all_target.cpu(), subject_list
+        return None, None, None
+
+    def _aggregate_subject_predictions(
+            self,
+            labels: Tensor,
+            logits: Tensor,
+            subjects: list[str],
+            ds_name: str,
+    ) -> tuple[Tensor, Tensor]:
+        aggregation = self.ds_info[ds_name]['eval']['subject_score_aggregation']
+        if aggregation != 'mean_logits':
+            raise ValueError(f"Unsupported subject aggregation for {ds_name}: {aggregation}")
+
+        subject_order: list[str] = []
+        subject_to_logits: dict[str, list[Tensor]] = {}
+        subject_to_label: dict[str, int] = {}
+        label_np = labels.numpy()
+
+        for idx, subject in enumerate(subjects):
+            label = int(label_np[idx])
+            if subject not in subject_to_logits:
+                subject_order.append(subject)
+                subject_to_logits[subject] = []
+                subject_to_label[subject] = label
+            elif subject_to_label[subject] != label:
+                raise ValueError(
+                    f"Subject {subject!r} in {ds_name} has inconsistent labels: "
+                    f"{subject_to_label[subject]} vs {label}."
+                )
+
+            subject_to_logits[subject].append(logits[idx])
+
+        agg_logits = torch.stack(
+            [torch.stack(subject_to_logits[subject], dim=0).mean(dim=0) for subject in subject_order],
+            dim=0,
+        )
+        agg_labels = torch.tensor(
+            [subject_to_label[subject] for subject in subject_order],
+            dtype=labels.dtype,
+        )
+        return agg_labels, agg_logits
 
     @staticmethod
     def _calc_confusion_matrix(pred: Tensor, target: Tensor, n_class: int) -> Tensor:
@@ -1387,6 +1458,7 @@ class AbstractTrainer(ABC):
                 'cnt': torch.zeros(1, dtype=torch.int64, device=self.device),
                 'logits': [],
                 'labels': [],
+                'subjects': [],
             }
 
         with torch.no_grad():
@@ -1409,10 +1481,15 @@ class AbstractTrainer(ABC):
                     overall_metrics[ds_name]['cnt'] += batch_size
                     overall_metrics[ds_name]['cm'] += cm.detach()
 
-                    logits_across, labels_across = self._gather_result(logits.detach(), labels.detach())
+                    logits_across, labels_across, subjects_across = self._gather_result(
+                        logits.detach(),
+                        labels.detach(),
+                        subjects=list(batch['subject']),
+                    )
                     if get_is_master():
                         overall_metrics[ds_name]['logits'].append(logits_across.cpu())
                         overall_metrics[ds_name]['labels'].append(labels_across.cpu())
+                        overall_metrics[ds_name]['subjects'].extend(subjects_across)
 
                 if is_dist:
                     torch.distributed.barrier()
@@ -1432,10 +1509,26 @@ class AbstractTrainer(ABC):
                 if get_is_master():
                     labels_all = torch.concat(overall_metrics[ds_name]['labels'], dim=0)
                     logits_all = torch.concat(overall_metrics[ds_name]['logits'], dim=0)
+                    labels_metric = labels_all
+                    logits_metric = logits_all
+                    if self.ds_info[ds_name]['eval']['aggregate_by_subject']:
+                        labels_metric, logits_metric = self._aggregate_subject_predictions(
+                            labels=labels_all,
+                            logits=logits_all,
+                            subjects=overall_metrics[ds_name]['subjects'],
+                            ds_name=ds_name,
+                        )
+
+                    pred_metric = torch.argmax(logits_metric, dim=1)
+                    overall_metrics[ds_name]['cm_metric'] = self._calc_confusion_matrix(
+                        pred_metric,
+                        labels_metric,
+                        self.ds_info[ds_name]['n_class'],
+                    ).cpu()
                     loss_metric = overall_metrics[ds_name]['loss'].detach().cpu().item()
                     metrics = self._calculate_metrics_for_dataset(
-                        labels=labels_all,
-                        logits=logits_all,
+                        labels=labels_metric,
+                        logits=logits_metric,
                         ds_name=ds_name,
                         prefix=prefix,
                         loss=loss_metric

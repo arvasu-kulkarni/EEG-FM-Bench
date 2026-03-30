@@ -6,12 +6,12 @@ seed: 42
 repetition: 1
 master_port: 51231
 multitask: false
-model_type: 'manas'
+model_type: 'manas-long'
 fs: 200
 
 # Data configuration
 data:
-  batch_size: 32
+  batch_size: 16
   num_workers: 16
   datasets:
     # seed: 'finetune'
@@ -19,21 +19,24 @@ data:
     # workload: 'finetune'
     # tuev: 'finetune'
     # tuab: 'finetune'
-    hmc: 'finetune'
-    siena_scalp: 'finetune'
+    # hmc: 'finetune'
+    # siena_scalp: 'finetune'
     # tusl: 'finetune'
     # mimul_11: 'finetune'
     # things_eeg_2: 'finetune'
     # seed_v: 'finetune'
-    adftd: 'finetune'
+    # adftd: 'finetune'
     # bcic_2a: 'finetune'
     # # seed_vii: 'finetune'
     # epilepsy_pnes_20s: 'finetune'
+    hmc_90: 'finetune'
+    hmc_60: 'finetune'
+    adftd_30: 'finetune'
 
 # MANAS model configuration
 model:
   # Pretrained weights
-  pretrained_path: '/share/tmp/arvasundx/ckpt/longv0control/mae_epoch_24.pt'
+  pretrained_path: '/share/arvasunewtemp/longv0/2026-03-23_14-45-47/mae_epoch_34.pt'
   # longv0control was trained with the Mahir MAE variant.
   mae_type: 'mahir'  # default: 'default'; options: default, mahir
 
@@ -71,15 +74,15 @@ model:
 
   # Classifier head configuration
   classifier_head:
-    head_type: 'flatten_mlp'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
+    head_type: 'attention_pool'  # Options: avg_pool, attention_pool, dual_stream_fusion, flatten_mlp
 
     # Common parameters
     hidden_dims: [128]
     dropout: 0.3
 
     # Attention Pool parameters (for attention_pool)
-    attn_n_head: 4
-    attn_head_dim: 64
+    attn_n_head: 8
+    attn_head_dim: 96
 
     # Dual Stream Fusion parameters (for dual_stream_fusion)
     fusion_mode: 'dual'  # Options: time_first, channel_first, dual
@@ -123,7 +126,7 @@ training:
 # Logging configuration
 logging:
   experiment_name: "manas"
-  run_dir: "/share/tmp/arvasundx/eval/longv0-control"
+  run_dir: "/share/tmp/arvasundx/eval/longv0longeval_attn"
 
   # Cloud logging
   use_cloud: true
@@ -131,10 +134,10 @@ logging:
 
   project: "manas"
   tags:
-    - "manas-longv0-control"
+    - "manas-longv0-longeval_attn"
     - "separated"
     - "full_ft"
-    - "flatten_mlp"
+    - "attention_pool"
 
   # Logging intervals
   log_step_interval: 1
