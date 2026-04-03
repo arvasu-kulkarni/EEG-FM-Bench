@@ -2,26 +2,26 @@ seed: 42
 repetition: 1
 master_port: 51231
 multitask: false
-model_type: "manas-long"
+model_type: "manas-long-v0.1"
 fs: 200
 
 data:
   batch_size: 32
   num_workers: 16
   datasets:
-    hmc: "finetune"
-    hmc_60: "finetune"
-    hmc_90: "finetune"
-    siena_scalp: "finetune"
-    adftd: "finetune"
+    # hmc: "finetune"
+    # hmc_60: "finetune"
+    # hmc_90: "finetune"
+    # siena_scalp: "finetune"
+    # adftd: "finetune"
     adftd_30: "finetune"
 
 model:
-  pretrained_path: "/REPLACE_ME/mae_baseline_short.pt"
+  pretrained_path: "/share/tmp/arvasundx/eval/longv0.1-aux0.1/2026-03-29_15-18-43/mae_epoch_20.pt"
   mae_type: "mahir"
   patch_seconds: 1.0
   overlap_seconds: 0.1
-  embed_dim: 512
+  embed_dim: 1024
   encoder_depth: 22
   encoder_heads: 8
   decoder_depth: 5
@@ -67,7 +67,7 @@ training:
   warmup_scale: 1e-1
   encoder_lr_scale: 0.1
   use_amp: true
-  train_method: "linear_probe"
+  train_method: "full_ft"
   dual_stage: false
   lora:
     use_lora: false
@@ -81,14 +81,14 @@ training:
     lora_lr_scale: 1.0
 
 logging:
-  experiment_name: "manas_long_baseline_short"
-  run_dir: "/share/tmp/arvasundx/eval/manas_long_baseline_short"
+  experiment_name: "manas_v0p1_large_1024bs_aux_0p1"
+  run_dir: "/share/arvasunewtemp/eval/manas_v0p1_large_1024bs_aux_0p1"
   use_cloud: true
   cloud_backend: "wandb"
   project: "manas"
   tags:
-    - "manas-long"
-    - "baseline-short"
-    - "flatten_mlp"
+    - "manas-long-v0.1"
+    - "v0.1-large-1024bs-aux-0p1"
+    - "attention_pool"
   log_step_interval: 1
   ckpt_interval: 1

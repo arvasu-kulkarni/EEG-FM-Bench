@@ -1,23 +1,27 @@
 seed: 42
 repetition: 1
 master_port: 51231
-multitask: false
-model_type: "manas-long-v0.1"
+multitask: true
+model_type: "manas"
 fs: 200
 
 data:
   batch_size: 32
   num_workers: 16
   datasets:
-    siena_90: "finetune"
-    adftd_90: "finetune"
+    hmc_90: "finetune"
+    hmc_60: "finetune"
+    hmc: "finetune"
+    adftd_30: "finetune"
+    adftd: "finetune"
+    siena_scalp: "finetune"
 
 model:
-  pretrained_path: "/share/arvasunewtemp/longv0.1/2026-03-26_04-13-58/mae_epoch_20.pt"
+  pretrained_path: "/share/arvasunewtemp/longcontrol/mae_epoch_10.pt"
   mae_type: "mahir"
   patch_seconds: 1.0
   overlap_seconds: 0.1
-  embed_dim: 1024
+  embed_dim: 512
   encoder_depth: 22
   encoder_heads: 8
   decoder_depth: 5
@@ -77,14 +81,15 @@ training:
     lora_lr_scale: 1.0
 
 logging:
-  experiment_name: "manas_v0p1_large_1024bs"
-  run_dir: "/share/arvasunewtemp/eval/manas_v0p1_large_1024bs"
+  experiment_name: "manas_long_control_multitask_eval"
+  run_dir: "/share/arvasunewtemp/eval/manas_long_control_multitask_eval"
   use_cloud: true
   cloud_backend: "wandb"
   project: "manas"
   tags:
-    - "manas-long-v0.1"
-    - "v0.1-large-1024bs"
+    - "manas-long"
+    - "long-control"
     - "attention_pool"
+    - "multitask-eval"
   log_step_interval: 1
   ckpt_interval: 1

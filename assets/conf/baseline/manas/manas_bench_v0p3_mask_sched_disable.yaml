@@ -1,23 +1,26 @@
 seed: 42
 repetition: 1
-master_port: 51231
+master_port: 51232
 multitask: false
-model_type: "manas-long-v0.1"
+model_type: "manas-long-v0.3"
 fs: 200
 
 data:
   batch_size: 32
   num_workers: 16
   datasets:
-    siena_90: "finetune"
-    adftd_90: "finetune"
+    # hmc: finetune
+    # adftd: finetune
+    # adftd_30: finetune
+    siena_scalp: finetune
+    hmc_60: finetune
+    hmc_90: finetune
 
 model:
-  pretrained_path: "/share/arvasunewtemp/longv0.1/2026-03-26_04-13-58/mae_epoch_20.pt"
-  mae_type: "mahir"
+  pretrained_path: "/share/v0.3-mask-sched-disable-mae_epoch_24.pt"
   patch_seconds: 1.0
   overlap_seconds: 0.1
-  embed_dim: 1024
+  embed_dim: 512
   encoder_depth: 22
   encoder_heads: 8
   decoder_depth: 5
@@ -25,13 +28,13 @@ model:
   mask_ratio: 0.55
   aux_loss_weight: 0.1
   which_mask: "default"
-  fuzzy_noise_std: 0.1
+  fuzzy_noise_std: 0.0
   spatial_radius_black: 3.0
   spatial_radius_fuzzy: 4.0
   temporal_radius_black: 3.0
   temporal_radius_fuzzy: 4.0
   dropout_ratio: 0.1
-  dropout_radius: 3.0
+  dropout_radius: 4.0
   ema_mix_ratio: 0.6
   ema_temperature: 2.0
   ema_floor_eps: 0.1
@@ -39,6 +42,28 @@ model:
   pairwise_exclude_datasets: []
   n_spatial_coords: 3
   posenc_n_freqs: 4
+  pool_from_mha_outputs: true
+  num_local_aux_tokens: 9
+  remove_bias_except_decoder_out: false
+  use_memory_tokens: true
+  memory_scales_seconds: [5.0, 30.0]
+  memory_active_scales_seconds: [5.0, 30.0]
+  memory_attention_scales_seconds: [5.0, 30.0]
+  memory_attention_use_null_token: false
+  memory_use_gru_tokens: false
+  memory_encoder_access_start_layers:
+    5.0: 7
+    30.0: 12
+  memory_decoder_access_start_layers:
+    5.0: 2
+    30.0: 1
+  memory_conv_kernel_sizes:
+    5.0: 400
+    30.0: 800
+  memory_patch_conv_channels: 64
+  memory_token_dims:
+    5.0: 512
+    30.0: 512
   classifier_head:
     head_type: "attention_pool"
     hidden_dims: [128]
@@ -53,17 +78,17 @@ model:
     fusion_max_seq_len: 1024
 
 training:
-  max_epochs: 20
-  weight_decay: 0.01
+  max_epochs: 24
+  weight_decay: 0.05
   max_grad_norm: 1.0
   lr_schedule: "cosine"
-  max_lr: 2.0e-4
+  max_lr: 2.4e-4
   min_lr: 2.0e-5
   warmup_epochs: 3
   warmup_scale: 1e-1
   encoder_lr_scale: 0.1
   use_amp: true
-  train_method: "linear_probe"
+  train_method: "full_ft"
   dual_stage: false
   lora:
     use_lora: false
@@ -77,14 +102,14 @@ training:
     lora_lr_scale: 1.0
 
 logging:
-  experiment_name: "manas_v0p1_large_1024bs"
-  run_dir: "/share/arvasunewtemp/eval/manas_v0p1_large_1024bs"
+  experiment_name: "manas_v0p3_mask_sched_disable"
+  run_dir: "/share/arvasunewtemp/eval/manas_v0p3_mask_sched_disable"
   use_cloud: true
   cloud_backend: "wandb"
   project: "manas"
   tags:
-    - "manas-long-v0.1"
-    - "v0.1-large-1024bs"
+    - "manas-long-v0.3"
+    - "v0.3-mask-sched-disable"
     - "attention_pool"
   log_step_interval: 1
   ckpt_interval: 1

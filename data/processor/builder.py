@@ -546,37 +546,71 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
                 chs_idx = self._fetch_chs_index(montage)
 
                 examples, stats = self._generate_window_sample(raw, montage, chs_idx, label, self.config.persist_drop_last)
-                filename = f"{self._encode_path(path)}.parquet"
                 if len(examples) > 0:
-                    df = pd.DataFrame(data=examples)
-                    df['subject'] = str(subject)
-                    output_path = self._build_output_dir(split, filename)
+                    # Parquet list columns use 32-bit offsets, so long-window datasets can overflow
+                    # if we persist every window from one recording into a single shard.
+                    data_len = int(len(examples[0]['data'])) if 'data' in examples[0] else 0
+                    max_list_rows = max(1, 2_000_000_000 // max(1, data_len))
+                    chunk_size = max(1, min(int(self.config.mid_batch_size), max_list_rows))
 
-                    if self.config.is_remote_fs:
-                        fs = s3fs.S3FileSystem(**self.s3_conf)
-                        with fs.open(output_path, 'wb') as f:
+                    for chunk_idx, start_idx in enumerate(range(0, len(examples), chunk_size)):
+                        chunk_examples = examples[start_idx:start_idx + chunk_size]
+                        df = pd.DataFrame(data=chunk_examples)
+                        df['subject'] = str(subject)
+
+                        filename = f"{self._encode_path(path)}.parquet"
+                        if len(examples) > chunk_size:
+                            filename = f"{self._encode_path(path)}_{chunk_idx:04d}.parquet"
+
+                        output_path = self._build_output_dir(split, filename)
+
+                        if self.config.is_remote_fs:
+                            fs = s3fs.S3FileSystem(**self.s3_conf)
+                            with fs.open(output_path, 'wb') as f:
+                                df.to_parquet(
+                                    f,
+                                    compression=self.config.mid_compress_algo,
+                                    engine='pyarrow',
+                                    index=False)
+                            fs.invalidate_cache()
+                        else:
                             df.to_parquet(
-                                f,
+                                output_path,
                                 compression=self.config.mid_compress_algo,
                                 engine='pyarrow',
                                 index=False)
-                        fs.invalidate_cache()
-                    else:
-                        df.to_parquet(
-                            output_path,
-                            compression=self.config.mid_compress_algo,
-                            engine='pyarrow',
-                            index=False)
         except Exception as e:
             logger.error(f"Error persisting example file {path}: {str(e)}")
             return None
 
+        if len(examples) < 1:
+            mid_df = pd.DataFrame(data={
+                'key': [None],
+                'split': [split],
+                'cnt': [0],
+                'possible_wnd_cnt': [stats['possible_wnd_cnt']],
+                'created_wnd_cnt': [stats['created_wnd_cnt']],
+            })
+            return mid_df
+
+        data_len = int(len(examples[0]['data'])) if 'data' in examples[0] else 0
+        max_list_rows = max(1, 2_000_000_000 // max(1, data_len))
+        chunk_size = max(1, min(int(self.config.mid_batch_size), max_list_rows))
+        filenames = []
+        counts = []
+        for chunk_idx, start_idx in enumerate(range(0, len(examples), chunk_size)):
+            filename = f"{self._encode_path(path)}.parquet"
+            if len(examples) > chunk_size:
+                filename = f"{self._encode_path(path)}_{chunk_idx:04d}.parquet"
+            filenames.append(filename)
+            counts.append(len(examples[start_idx:start_idx + chunk_size]))
+
         mid_df = pd.DataFrame(data={
-            'key': [filename if len(examples) > 0 else None],
-            'split': [split],
-            'cnt': [len(examples)],
-            'possible_wnd_cnt': [stats['possible_wnd_cnt']],
-            'created_wnd_cnt': [stats['created_wnd_cnt']],
+            'key': filenames,
+            'split': [split] * len(filenames),
+            'cnt': counts,
+            'possible_wnd_cnt': [stats['possible_wnd_cnt']] + [0] * (len(filenames) - 1),
+            'created_wnd_cnt': [stats['created_wnd_cnt']] + [0] * (len(filenames) - 1),
         })
         return mid_df
 

@@ -28,10 +28,10 @@ data:
     # adftd: 'finetune'
     # bcic_2a: 'finetune'
     # # seed_vii: 'finetune'
-    # epilepsy_pnes_20s: 'finetune'
-    hmc_90: 'finetune'
-    hmc_60: 'finetune'
-    adftd_30: 'finetune'
+    epilepsy_pnes_20s: 'finetune'
+    # hmc_90: 'finetune'
+    # hmc_60: 'finetune'
+    # adftd_30: 'finetune'
 
 # MANAS model configuration
 model:

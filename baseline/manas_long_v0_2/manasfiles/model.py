@@ -186,16 +186,23 @@ class MemoryAugmentedEncoder(nn.Module):
         x: torch.Tensor,
         memory_tokens: dict[str, torch.Tensor] | None = None,
         memory_parent_indices: dict[str, torch.Tensor] | None = None,
+        available_memory_scale_names: set[str] | None = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
         attn_intermediates = []
         ffn_intermediates = []
 
         memory_tokens = memory_tokens or {}
         memory_parent_indices = memory_parent_indices or {}
+        if available_memory_scale_names is None:
+            available_memory_scale_names = set(memory_tokens.keys()) & set(memory_parent_indices.keys())
 
         for block_idx, layer in enumerate(self.layers, start=1):
             x, attn_out, ffn_out = layer(x)
-            available_scales = self._scales_for_block(block_idx)
+            available_scales = tuple(
+                scale
+                for scale in self._scales_for_block(block_idx)
+                if _memory_scale_name(scale) in available_memory_scale_names
+            )
             if available_scales:
                 x = x + self.memory_branch(
                     query_tokens=x,
@@ -443,7 +450,14 @@ class MAE(nn.Module):
         memory_tokens_by_scale: dict[str, torch.Tensor] = {}
         centers_by_scale: dict[str, torch.Tensor] = {}
 
-        for scale in self.memory_build_order_seconds:
+        total_samples = int(raw_x.shape[-1])
+        valid_scales = tuple(
+            scale
+            for scale in self.memory_build_order_seconds
+            if total_samples >= int(round(scale * self.fs))
+        )
+
+        for scale in valid_scales:
             scale_name = self._memory_scale_name(scale)
             patch_seq, centers = self.memory_patch_embeds[scale_name](
                 x=raw_x,
@@ -509,11 +523,13 @@ class MAE(nn.Module):
             for scale_name, centers in memory_centers.items()
             if scale_name in memory_tokens
         }
+        available_memory_scale_names = set(memory_tokens.keys()) & set(encoder_parent_indices.keys())
 
         x_encoded, _, _ = self.encoder(
             x_full,
             memory_tokens=memory_tokens,
             memory_parent_indices=encoder_parent_indices,
+            available_memory_scale_names=available_memory_scale_names,
         )
         return x_encoded.reshape(batch_size, num_channels, num_patches, self.embed_dim)
 

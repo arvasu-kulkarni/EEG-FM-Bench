@@ -1,5 +1,5 @@
 """
-Encoder-side MANAS-Long v0.1 backbone adapted from ndx-pipeline.
+Encoder-side MANAS-Long v0.3 backbone adapted from ndx-pipeline.
 """
 
 from __future__ import annotations
@@ -12,61 +12,181 @@ import torch.nn as nn
 from baseline.manas_long.manasfiles.model import (
     PatchEmbed,
     PosEnc,
-    ScaleMemoryToken,
+    RMSNorm,
     TransformerBlock,
     _memory_scale_name,
 )
+from baseline.manas_long_v0_1.manasfiles.model import RawMemoryPatchEmbed
 
 
-class ParentMemoryAttention(nn.Module):
+class AcrossScaleFullMemoryAttention(nn.Module):
     def __init__(
         self,
         query_dim: int,
-        memory_dim: int | None = None,
+        memory_scales: tuple[float, ...],
+        memory_token_dims: dict[float, int] | None = None,
+        heads: int = 8,
         attn_dim: int | None = None,
         bias: bool = True,
+        use_null_memory_token: bool = False,
     ):
         super().__init__()
         self.query_dim = int(query_dim)
-        self.memory_dim = self.query_dim if memory_dim is None else int(memory_dim)
         self.attn_dim = self.query_dim if attn_dim is None else int(attn_dim)
-        self.head_dim = self.attn_dim
-        self.q_proj = nn.Linear(self.query_dim, self.attn_dim, bias=bias)
-        self.k_proj = nn.Linear(self.memory_dim, self.attn_dim, bias=bias)
-        self.v_proj = nn.Linear(self.memory_dim, self.attn_dim, bias=bias)
-        self.out_proj = nn.Linear(self.attn_dim, self.query_dim, bias=bias)
+        self.memory_scales = tuple(float(scale) for scale in memory_scales)
+        self.memory_token_dims = {
+            float(scale): self.query_dim
+            if memory_token_dims is None
+            else int(memory_token_dims.get(float(scale), self.query_dim))
+            for scale in self.memory_scales
+        }
+        self.heads = int(heads)
+        if self.attn_dim % self.heads != 0:
+            raise ValueError("attn_dim must be divisible by heads")
+        self.head_dim = self.attn_dim // self.heads
+        self.use_null_memory_token = bool(use_null_memory_token)
+        self.scale_names = tuple(_memory_scale_name(scale) for scale in self.memory_scales)
+        self.branch_names = self.scale_names + (("null",) if self.use_null_memory_token else tuple())
+        proj_dims = {name: self.memory_token_dims[scale] for scale, name in zip(self.memory_scales, self.scale_names)}
+        if self.use_null_memory_token:
+            proj_dims["null"] = self.query_dim
+
+        self.q_proj = nn.ModuleDict(
+            {
+                name: nn.Linear(self.query_dim, self.attn_dim, bias=bias)
+                for name in self.branch_names
+            }
+        )
+        self.k_proj = nn.ModuleDict(
+            {
+                name: nn.Linear(proj_dims[name], self.attn_dim, bias=bias)
+                for name in self.branch_names
+            }
+        )
+        self.v_proj = nn.ModuleDict(
+            {
+                name: nn.Linear(proj_dims[name], self.attn_dim, bias=bias)
+                for name in self.branch_names
+            }
+        )
+        self.out_proj = nn.ModuleDict(
+            {
+                name: nn.Linear(self.attn_dim, self.query_dim, bias=bias)
+                for name in self.branch_names
+            }
+        )
+        self.branch_norm = nn.ModuleDict(
+            {
+                name: RMSNorm(self.query_dim)
+                for name in self.branch_names
+            }
+        )
+        if self.use_null_memory_token:
+            self.null_memory = nn.Parameter(torch.zeros(1, 1, self.query_dim))
+            nn.init.normal_(self.null_memory, std=0.02)
+        else:
+            self.register_parameter("null_memory", None)
 
     def forward(
         self,
         query_tokens: torch.Tensor,
-        memory_tokens: torch.Tensor,
-        parent_indices: torch.Tensor,
+        memory_tokens: dict[str, torch.Tensor],
+        memory_parent_indices: dict[str, torch.Tensor],
+        available_scales: tuple[float, ...],
+        scale_logits: torch.Tensor | None = None,
         query_mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if query_tokens.ndim != 3 or memory_tokens.ndim != 3:
-            raise ValueError("query_tokens and memory_tokens must both have shape (B, T, D)")
-        if parent_indices.shape != query_tokens.shape[:2]:
-            raise ValueError(
-                f"parent_indices shape mismatch: expected {tuple(query_tokens.shape[:2])}, got {tuple(parent_indices.shape)}"
+        if query_tokens.ndim != 3:
+            raise ValueError(f"query_tokens must have shape (B, T, D), got {tuple(query_tokens.shape)}")
+
+        del memory_parent_indices
+
+        batch_size, _, _ = query_tokens.shape
+        used_scale_names: list[str] = []
+        branch_outputs: list[torch.Tensor] = []
+
+        for scale in available_scales:
+            scale_name = _memory_scale_name(scale)
+            scale_memory = memory_tokens.get(scale_name)
+            if scale_memory is None:
+                continue
+            if scale_memory.ndim != 3:
+                raise ValueError(f"memory_tokens[{scale_name!r}] must have shape (B, T, D)")
+            used_scale_names.append(scale_name)
+            branch_out = self._cross_attention(
+                branch_name=scale_name,
+                query_tokens=query_tokens,
+                memory_sequence=scale_memory,
+            )
+            branch_outputs.append(branch_out)
+
+        if self.use_null_memory_token:
+            used_scale_names.append("null")
+            branch_outputs.append(
+                self._cross_attention(
+                    branch_name="null",
+                    query_tokens=query_tokens,
+                    memory_sequence=self.null_memory.expand(batch_size, -1, -1),
+                )
             )
 
-        parent_indices = parent_indices.clamp(min=0, max=max(0, memory_tokens.shape[1] - 1)).long()
-        gather_index = parent_indices.unsqueeze(-1).expand(-1, -1, memory_tokens.shape[-1])
-        parent_memory = torch.gather(memory_tokens, dim=1, index=gather_index)
+        if not branch_outputs:
+            return query_tokens.new_zeros(query_tokens.shape)
 
-        q = self.q_proj(query_tokens).unsqueeze(2)
-        k = self.k_proj(parent_memory).unsqueeze(2)
-        v = self.v_proj(parent_memory).unsqueeze(2)
-
-        attn_scores = (q * k).sum(dim=-1, keepdim=True) / math.sqrt(float(self.head_dim))
-        attn_weights = torch.softmax(attn_scores, dim=2)
-        out = (attn_weights * v).sum(dim=2)
-        out = self.out_proj(out)
+        gamma = self._branch_gammas(
+            used_scale_names=tuple(used_scale_names),
+            scale_logits=scale_logits,
+            device=query_tokens.device,
+            dtype=query_tokens.dtype,
+        )
+        out = query_tokens.new_zeros(query_tokens.shape)
+        for gamma_i, branch_out in zip(gamma, branch_outputs):
+            out = out + branch_out * gamma_i
 
         if query_mask is not None:
             out = out * query_mask.unsqueeze(-1).to(dtype=out.dtype)
-
         return out
+
+    def _branch_gammas(
+        self,
+        used_scale_names: tuple[str, ...],
+        scale_logits: torch.Tensor | None,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if not used_scale_names:
+            return torch.zeros((0,), device=device, dtype=dtype)
+        if scale_logits is None:
+            return torch.full(
+                (len(used_scale_names),),
+                1.0 / float(len(used_scale_names)),
+                device=device,
+                dtype=dtype,
+            )
+
+        name_to_idx = {name: idx for idx, name in enumerate(self.branch_names)}
+        selected_logits = torch.stack([scale_logits[name_to_idx[name]] for name in used_scale_names], dim=0)
+        return torch.softmax(selected_logits, dim=0).to(device=device, dtype=dtype)
+
+    def _cross_attention(
+        self,
+        branch_name: str,
+        query_tokens: torch.Tensor,
+        memory_sequence: torch.Tensor,
+    ) -> torch.Tensor:
+        batch_size, num_queries, _ = query_tokens.shape
+        num_memory = int(memory_sequence.shape[1])
+
+        q = self.q_proj[branch_name](query_tokens).view(batch_size, num_queries, self.heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj[branch_name](memory_sequence).view(batch_size, num_memory, self.heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj[branch_name](memory_sequence).view(batch_size, num_memory, self.heads, self.head_dim).transpose(1, 2)
+
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(float(self.head_dim))
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        branch_out = torch.matmul(attn_weights, v)
+        branch_out = branch_out.transpose(1, 2).contiguous().view(batch_size, num_queries, self.attn_dim)
+        branch_out = self.out_proj[branch_name](branch_out)
+        return self.branch_norm[branch_name](branch_out)
 
 
 class MemoryAugmentedEncoder(nn.Module):
@@ -81,19 +201,24 @@ class MemoryAugmentedEncoder(nn.Module):
         memory_scales: tuple[float, ...] = (5.0, 10.0, 30.0),
         memory_token_dims: dict[float, int] | None = None,
         memory_access_start_layers: dict[float, int] | None = None,
+        use_null_memory_token: bool = False,
     ):
         super().__init__()
         self.memory_scales = tuple(float(scale) for scale in memory_scales)
-        self.memory_token_dims = {float(scale): int(dim) for scale, dim in (memory_token_dims or {}).items()}
+        self.memory_token_dims = {
+            float(scale): int(dim)
+            for scale, dim in (memory_token_dims or {}).items()
+        }
         self.memory_access_start_layers = {
-            float(scale): int(start_layer) for scale, start_layer in (memory_access_start_layers or {}).items()
+            float(scale): int(start_layer)
+            for scale, start_layer in (memory_access_start_layers or {}).items()
         }
 
         self.layers = nn.ModuleList(
             [
                 TransformerBlock(
-                    embed_dim=embed_dim,
-                    heads=heads,
+                    embed_dim,
+                    heads,
                     dropout=dropout,
                     use_flash_attention=use_flash_attention,
                     bias=bias,
@@ -101,19 +226,16 @@ class MemoryAugmentedEncoder(nn.Module):
                 for _ in range(depth)
             ]
         )
-        self.memory_branches = nn.ModuleDict(
-            {
-                _memory_scale_name(scale): ParentMemoryAttention(
-                    query_dim=embed_dim,
-                    memory_dim=self.memory_token_dims.get(scale, embed_dim),
-                    bias=bias,
-                )
-                for scale in self.memory_scales
-            }
+        self.memory_branch = AcrossScaleFullMemoryAttention(
+            query_dim=embed_dim,
+            memory_scales=self.memory_scales,
+            memory_token_dims=self.memory_token_dims,
+            heads=heads,
+            bias=bias,
+            use_null_memory_token=use_null_memory_token,
         )
-
-        from baseline.manas_long.manasfiles.model import RMSNorm
-
+        self.memory_branch_names = self.memory_branch.branch_names
+        self.memory_scale_alpha = nn.Parameter(torch.zeros(depth, len(self.memory_branch_names)))
         self.final_norm = RMSNorm(embed_dim)
 
     def _scales_for_block(self, block_idx_1based: int) -> tuple[float, ...]:
@@ -128,31 +250,27 @@ class MemoryAugmentedEncoder(nn.Module):
         x: torch.Tensor,
         memory_tokens: dict[str, torch.Tensor] | None = None,
         memory_parent_indices: dict[str, torch.Tensor] | None = None,
-        available_memory_scale_names: set[str] | None = None,
     ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor]]:
         attn_intermediates = []
         ffn_intermediates = []
 
         memory_tokens = memory_tokens or {}
         memory_parent_indices = memory_parent_indices or {}
-        if available_memory_scale_names is None:
-            available_memory_scale_names = set(memory_tokens.keys()) & set(memory_parent_indices.keys())
 
         for block_idx, layer in enumerate(self.layers, start=1):
             x, attn_out, ffn_out = layer(x)
-
-            for scale in self._scales_for_block(block_idx):
-                scale_name = _memory_scale_name(scale)
-                if scale_name not in available_memory_scale_names:
-                    continue
-                scale_memory = memory_tokens.get(scale_name)
-                scale_parent = memory_parent_indices.get(scale_name)
-                if scale_memory is None or scale_parent is None:
-                    continue
-                x = x + self.memory_branches[scale_name](
+            available_scales = tuple(
+                scale
+                for scale in self._scales_for_block(block_idx)
+                if _memory_scale_name(scale) in memory_tokens
+            )
+            if available_scales or self.memory_branch.use_null_memory_token:
+                x = x + self.memory_branch(
                     query_tokens=x,
-                    memory_tokens=scale_memory,
-                    parent_indices=scale_parent,
+                    memory_tokens=memory_tokens,
+                    memory_parent_indices=memory_parent_indices,
+                    available_scales=available_scales,
+                    scale_logits=self.memory_scale_alpha[block_idx - 1],
                 )
 
             attn_intermediates.append(attn_out)
@@ -161,93 +279,55 @@ class MemoryAugmentedEncoder(nn.Module):
         return self.final_norm(x), attn_intermediates, ffn_intermediates
 
 
-class RawMemoryPatchEmbed(nn.Module):
-    def __init__(
-        self,
-        scale_samples: int,
-        scale_step: int,
-        conv_kernel_size: int,
-        base_step: int,
-        output_dim: int,
-        conv_channels: int = 64,
-        bias: bool = True,
-    ):
+class ScaleMemoryToken(nn.Module):
+    def __init__(self, embed_dim: int, bias: bool = True, use_gru: bool = True):
         super().__init__()
-        if scale_samples <= 0 or scale_step <= 0:
-            raise ValueError("scale_samples and scale_step must be > 0")
-        if conv_kernel_size <= 0 or base_step <= 0:
-            raise ValueError("conv_kernel_size and base_step must be > 0")
-        if conv_kernel_size > scale_samples:
-            raise ValueError("conv_kernel_size must be <= scale_samples")
-
-        self.scale_samples = int(scale_samples)
-        self.scale_step = int(scale_step)
-        self.conv_kernel_size = int(conv_kernel_size)
-        self.base_step = int(base_step)
-        self.conv_channels = int(conv_channels)
-
-        self.tokens_per_window = max(1, ((self.scale_samples - self.conv_kernel_size) // self.base_step) + 1)
-        self.start_patch_stride = max(1, self.scale_step // self.base_step)
-
-        self.raw_conv = nn.Conv1d(
-            in_channels=1,
-            out_channels=self.conv_channels,
-            kernel_size=self.conv_kernel_size,
-            stride=self.base_step,
-            bias=bias,
-        )
-        self.proj = nn.Linear(self.conv_channels * self.tokens_per_window, output_dim, bias=False)
+        self.use_gru = bool(use_gru)
+        self.state_norm = RMSNorm(embed_dim)
+        self.new_info_norm = RMSNorm(embed_dim)
+        if self.use_gru:
+            self.gru = nn.GRUCell(embed_dim, embed_dim, bias=bias)
+            self.init_state = nn.Parameter(torch.zeros(1, embed_dim))
+        else:
+            self.gru = None
+            self.register_parameter("init_state", None)
 
     def forward(
         self,
-        x: torch.Tensor,
-        token_mask_grid: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        if x.shape[-1] < self.scale_samples:
-            raise ValueError(
-                f"input is too short for memory scale: need {self.scale_samples} samples, got {x.shape[-1]}"
-            )
-        windows = x.unfold(dimension=-1, size=self.scale_samples, step=self.scale_step)
-        batch_size, num_channels, num_windows, _ = windows.shape
+        sequence: torch.Tensor,
+        time_weights: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if sequence.ndim != 3:
+            raise ValueError(f"Expected sequence shape (B, P, D), got {tuple(sequence.shape)}")
 
-        conv_in = windows.reshape(batch_size * num_channels * num_windows, 1, self.scale_samples)
-        conv_out = self.raw_conv(conv_in).reshape(
-            batch_size,
-            num_channels,
-            num_windows,
-            self.conv_channels,
-            self.tokens_per_window,
-        )
+        batch_size, num_steps, _ = sequence.shape
+        if num_steps == 0:
+            return sequence.new_zeros((batch_size, 0, sequence.shape[-1]))
 
-        if token_mask_grid is None:
-            channel_weights = torch.ones((batch_size, num_channels, num_windows), device=x.device, dtype=conv_out.dtype)
-        else:
-            patch_offsets = torch.arange(self.tokens_per_window, device=x.device)
-            start_patch_idx = torch.arange(num_windows, device=x.device) * self.start_patch_stride
-            patch_idx = (start_patch_idx.unsqueeze(-1) + patch_offsets.unsqueeze(0)).clamp(
-                max=token_mask_grid.shape[-1] - 1
-            )
-            token_mask_expanded = token_mask_grid.unsqueeze(2).expand(-1, -1, num_windows, -1)
-            gather_index = patch_idx.view(1, 1, num_windows, self.tokens_per_window).expand(
-                batch_size, num_channels, -1, -1
-            )
-            window_mask = torch.gather(token_mask_expanded, dim=3, index=gather_index).to(dtype=conv_out.dtype)
-            conv_out = conv_out * window_mask.unsqueeze(-2)
-            channel_weights = window_mask.mean(dim=-1)
+        weights = None if time_weights is None else time_weights.to(dtype=sequence.dtype)
+        if not self.use_gru:
+            if weights is not None:
+                sequence = sequence * weights.unsqueeze(-1)
+            return self.state_norm(self.new_info_norm(sequence))
 
-        window_embed = self.proj(conv_out.flatten(start_dim=3))
-        denom = channel_weights.sum(dim=1, keepdim=False).clamp_min(1.0).unsqueeze(-1)
-        pooled = (window_embed * channel_weights.unsqueeze(-1)).sum(dim=1) / denom
+        if self.init_state is None or self.gru is None:
+            raise RuntimeError("ScaleMemoryToken GRU state requested while use_gru=False")
 
-        centers = (
-            torch.arange(num_windows, device=x.device, dtype=torch.float32) * float(self.scale_step)
-            + (0.5 * float(self.scale_samples))
-        )
-        return pooled, centers
+        state = self.init_state.expand(batch_size, -1)
+        outputs = []
+        for step_idx in range(num_steps):
+            new_info = sequence[:, step_idx, :]
+            if weights is not None:
+                new_info = new_info * weights[:, step_idx].unsqueeze(-1)
+            new_info = self.new_info_norm(new_info)
+            state = self.gru(new_info, state)
+            outputs.append(self.state_norm(state).unsqueeze(1))
+
+        return torch.cat(outputs, dim=1)
 
 
 class MAE(nn.Module):
-    """Encoder-only subset of the MANAS-Long v0.1 MAE used for downstream classification."""
+    """Encoder-only subset of the MANAS-Long v0.3 MAE used for downstream classification."""
 
     def __init__(
         self,
@@ -268,11 +348,15 @@ class MAE(nn.Module):
         memory_active_scales_seconds: list[float] | None = None,
         memory_attention_scales_seconds: list[float] | None = None,
         memory_encoder_access_start_layers: dict[float | str, int] | None = None,
+        memory_decoder_access_start_layers: dict[float | str, int] | None = None,
         memory_conv_kernel_size: int | None = None,
         memory_conv_kernel_sizes: dict[float | str, int] | None = None,
         memory_patch_conv_channels: int = 64,
         memory_token_dim: int | None = None,
         memory_token_dims: dict[float | str, int] | None = None,
+        memory_attention_use_null_token: bool = False,
+        memory_use_gru_tokens: bool = False,
+        num_local_aux_tokens: int = 0,
     ):
         super().__init__()
 
@@ -284,9 +368,12 @@ class MAE(nn.Module):
         self.attn_dropout = float(attn_dropout)
         self.use_flash_attention = bool(use_flash_attention)
         self.use_memory_tokens = bool(use_memory_tokens)
+        self.memory_attention_use_null_token = bool(memory_attention_use_null_token)
+        self.memory_use_gru_tokens = bool(memory_use_gru_tokens)
         self.memory_patch_conv_channels = int(memory_patch_conv_channels)
         self.memory_token_dim = self.embed_dim if memory_token_dim is None else int(memory_token_dim)
         self.memory_conv_kernel_size = None if memory_conv_kernel_size is None else int(memory_conv_kernel_size)
+        self.N_local_aux_tokens = int(num_local_aux_tokens)
 
         if self.n_spatial_coords <= 0:
             raise ValueError("n_spatial_coords must be > 0")
@@ -300,6 +387,8 @@ class MAE(nn.Module):
             raise ValueError("memory_token_dim must be > 0")
         if self.memory_conv_kernel_size is not None and self.memory_conv_kernel_size <= 0:
             raise ValueError("memory_conv_kernel_size must be > 0 when provided")
+        if self.N_local_aux_tokens < 0 or self.N_local_aux_tokens == 1:
+            raise ValueError("num_local_aux_tokens must be a non-negative integer not equal to 1")
 
         if memory_scales_seconds is None:
             memory_scales_seconds = [5.0, 10.0, 30.0]
@@ -309,6 +398,8 @@ class MAE(nn.Module):
             memory_attention_scales_seconds = [5.0, 10.0, 30.0]
         if memory_encoder_access_start_layers is None:
             memory_encoder_access_start_layers = {5.0: 9, 10.0: 9, 30.0: 15}
+        if memory_decoder_access_start_layers is None:
+            memory_decoder_access_start_layers = {5.0: 3, 10.0: 2, 30.0: 1}
         if memory_conv_kernel_sizes is None:
             memory_conv_kernel_sizes = {}
         if memory_token_dims is None:
@@ -317,7 +408,6 @@ class MAE(nn.Module):
         parsed_scales = tuple(float(scale) for scale in memory_scales_seconds)
         parsed_active_scales = tuple(float(scale) for scale in memory_active_scales_seconds)
         parsed_attention_scales = tuple(float(scale) for scale in memory_attention_scales_seconds)
-
         if any(scale <= 0.0 for scale in parsed_scales):
             raise ValueError("memory_scales_seconds must contain only positive values")
         if any(scale <= 0.0 for scale in parsed_active_scales):
@@ -329,11 +419,12 @@ class MAE(nn.Module):
         if any(scale not in parsed_scales for scale in parsed_attention_scales):
             raise ValueError("memory_attention_scales_seconds must be a subset of memory_scales_seconds")
 
-        parsed_encoder_access_start_layers = {float(scale): int(start) for scale, start in memory_encoder_access_start_layers.items()}
+        parsed_encoder_access = {float(scale): int(start) for scale, start in memory_encoder_access_start_layers.items()}
+        parsed_decoder_access = {float(scale): int(start) for scale, start in memory_decoder_access_start_layers.items()}
         parsed_memory_conv_kernel_sizes = {float(scale): int(kernel) for scale, kernel in memory_conv_kernel_sizes.items()}
         parsed_memory_token_dims = {float(scale): int(dim) for scale, dim in memory_token_dims.items()}
 
-        missing_encoder_scales = [scale for scale in parsed_attention_scales if scale not in parsed_encoder_access_start_layers]
+        missing_encoder_scales = [scale for scale in parsed_attention_scales if scale not in parsed_encoder_access]
         if missing_encoder_scales:
             raise ValueError(
                 "memory_encoder_access_start_layers must define a start layer for every attention scale; "
@@ -345,7 +436,12 @@ class MAE(nn.Module):
         self.memory_build_order_seconds = tuple(sorted(self.memory_active_scales_seconds))
         self.memory_attention_scales_seconds = parsed_attention_scales if self.use_memory_tokens else tuple()
         self.memory_encoder_access_start_layers = (
-            {scale: parsed_encoder_access_start_layers[scale] for scale in self.memory_attention_scales_seconds}
+            {scale: parsed_encoder_access[scale] for scale in self.memory_attention_scales_seconds}
+            if self.use_memory_tokens
+            else {}
+        )
+        self.memory_decoder_access_start_layers = (
+            {scale: parsed_decoder_access[scale] for scale in self.memory_attention_scales_seconds}
             if self.use_memory_tokens
             else {}
         )
@@ -374,7 +470,6 @@ class MAE(nn.Module):
             if self.use_memory_tokens
             else {}
         )
-
         for scale in self.memory_scales_seconds:
             kernel_size = self.memory_conv_kernel_sizes[scale]
             scale_samples = int(round(scale * self.fs))
@@ -399,6 +494,7 @@ class MAE(nn.Module):
             memory_scales=self.memory_attention_scales_seconds,
             memory_token_dims=self.memory_token_dims,
             memory_access_start_layers=self.memory_encoder_access_start_layers,
+            use_null_memory_token=self.memory_attention_use_null_token,
         )
 
         self.memory_patch_embeds = nn.ModuleDict()
@@ -419,6 +515,7 @@ class MAE(nn.Module):
             self.memory_token_modules[scale_name] = ScaleMemoryToken(
                 embed_dim=self.memory_token_dims[scale],
                 bias=use_bias,
+                use_gru=self.memory_use_gru_tokens,
             )
 
     @staticmethod
@@ -429,7 +526,6 @@ class MAE(nn.Module):
         batch_size, num_channels, _ = xyz.shape
         if xyz.shape[-1] != self.n_spatial_coords:
             raise ValueError(f"Expected xyz last dim == {self.n_spatial_coords}, got {xyz.shape[-1]}")
-
         device = xyz.device
         time_idx = torch.arange(num_patches, device=device, dtype=torch.float32)
         spat = xyz.unsqueeze(2).expand(-1, -1, num_patches, -1)
@@ -440,7 +536,6 @@ class MAE(nn.Module):
     def _to_pairwise_channels(self, x: torch.Tensor, xyz: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.use_pairwise_channel_diffs:
             return x, xyz
-
         if xyz.shape[-1] != 3:
             raise ValueError(f"Pairwise channel diffs expect xyz with last dim 3, got {xyz.shape[-1]}")
         if x.shape[1] != xyz.shape[1]:
@@ -451,7 +546,6 @@ class MAE(nn.Module):
         i, j = torch.triu_indices(x.shape[1], x.shape[1], offset=1, device=x.device)
         x_pair = (x[:, i, :] - x[:, j, :]) / math.sqrt(2.0)
         xyz_pair = torch.cat([xyz[:, i, :], xyz[:, j, :]], dim=-1)
-
         xyz_orig = torch.cat([xyz, xyz], dim=-1)
         x_all = torch.cat([x, x_pair], dim=1)
         xyz_all = torch.cat([xyz_orig, xyz_pair], dim=1)
@@ -461,38 +555,29 @@ class MAE(nn.Module):
         self,
         raw_x: torch.Tensor,
         token_mask_grid: torch.Tensor | None = None,
-    ) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    ) -> dict[str, torch.Tensor]:
         if not self.use_memory_tokens or not self.memory_active_scales_seconds:
-            return {}, {}
-
-        memory_tokens_by_scale: dict[str, torch.Tensor] = {}
-        centers_by_scale: dict[str, torch.Tensor] = {}
+            return {}
 
         total_samples = int(raw_x.shape[-1])
         valid_scales = tuple(
             scale
             for scale in self.memory_build_order_seconds
-            if total_samples >= int(round(scale * self.fs))
+            # Match the older MANAS-Long ports: keep a scale whenever the current
+            # sample is long enough to materialize at least one window for it.
+            if total_samples >= self.memory_patch_embeds[self._memory_scale_name(scale)].scale_samples
         )
 
+        memory_tokens_by_scale: dict[str, torch.Tensor] = {}
         for scale in valid_scales:
             scale_name = self._memory_scale_name(scale)
-            patch_seq, centers = self.memory_patch_embeds[scale_name](
+            patch_seq, _ = self.memory_patch_embeds[scale_name](
                 x=raw_x,
                 token_mask_grid=token_mask_grid,
             )
-            scale_tokens = self.memory_token_modules[scale_name](sequence=patch_seq)
-            memory_tokens_by_scale[scale_name] = scale_tokens
-            centers_by_scale[scale_name] = centers
+            memory_tokens_by_scale[scale_name] = self.memory_token_modules[scale_name](sequence=patch_seq)
 
-        return memory_tokens_by_scale, centers_by_scale
-
-    @staticmethod
-    def _memory_parent_indices(query_centers: torch.Tensor, memory_centers: torch.Tensor) -> torch.Tensor:
-        if memory_centers.numel() == 0:
-            return torch.zeros_like(query_centers, dtype=torch.long)
-        dists = torch.abs(query_centers.unsqueeze(-1) - memory_centers.view(1, 1, -1))
-        return torch.argmin(dists, dim=-1)
+        return memory_tokens_by_scale
 
     def num_patches_for_length(self, total_samples: int) -> int:
         if total_samples < self.patch_size:
@@ -517,22 +602,12 @@ class MAE(nn.Module):
         coords = self.prepare_coords(xyz, num_patches)
         x_full = tokens_flat + self.pos_enc(coords)
 
-        memory_tokens, memory_centers = self._build_memory_tokens(raw_x=raw_x, token_mask_grid=None)
-
-        time_idx_full = coords[..., self.n_spatial_coords]
-        query_centers_full = time_idx_full * float(self.step) + (0.5 * float(self.patch_size))
-        encoder_parent_indices = {
-            scale_name: self._memory_parent_indices(query_centers=query_centers_full, memory_centers=centers)
-            for scale_name, centers in memory_centers.items()
-            if scale_name in memory_tokens
-        }
-        available_memory_scale_names = set(memory_tokens.keys()) & set(encoder_parent_indices.keys())
+        memory_tokens = self._build_memory_tokens(raw_x=raw_x, token_mask_grid=None)
 
         x_encoded, _, _ = self.encoder(
             x_full,
             memory_tokens=memory_tokens,
-            memory_parent_indices=encoder_parent_indices,
-            available_memory_scale_names=available_memory_scale_names,
+            memory_parent_indices={},
         )
         return x_encoded.reshape(batch_size, num_channels, num_patches, self.embed_dim)
 

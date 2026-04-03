@@ -50,7 +50,7 @@ from data.processor.builder import EEGDatasetBuilder, EEGConfig
 
 log = logging.getLogger()
 
-WINDOW_ALIAS_PATTERN = re.compile(r"^(?P<base>hmc|adftd)_(?P<window_sec>\d+)(?:s)?$")
+WINDOW_ALIAS_PATTERN = re.compile(r"^(?P<base>hmc|siena|adftd)_(?P<window_sec>\d+)(?:s)?$")
 
 
 DATASET_SELECTOR: dict[str, Type[EEGDatasetBuilder]] = {
@@ -93,6 +93,12 @@ DATASET_SELECTOR: dict[str, Type[EEGDatasetBuilder]] = {
     'epilepsy_pnes_20s': EpilepsyPnes20sBuilder,
 }
 
+WINDOW_ALIAS_BASE_TO_DATASET = {
+    'hmc': 'hmc',
+    'siena': 'siena_scalp',
+    'adftd': 'adftd',
+}
+
 
 def resolve_dataset_request(dataset_name: str) -> tuple[str, Type[EEGDatasetBuilder], dict[str, int | str]]:
     if dataset_name in DATASET_SELECTOR:
@@ -104,7 +110,8 @@ def resolve_dataset_request(dataset_name: str) -> tuple[str, Type[EEGDatasetBuil
 
     base_name = match.group('base')
     window_sec = int(match.group('window_sec'))
-    builder_cls = DATASET_SELECTOR[base_name]
+    dataset_key = WINDOW_ALIAS_BASE_TO_DATASET[base_name]
+    builder_cls = DATASET_SELECTOR[dataset_key]
     return dataset_name, builder_cls, {
         'dataset_name': dataset_name,
         'wnd_div_sec': window_sec,

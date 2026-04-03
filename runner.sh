@@ -18,9 +18,19 @@ touch "$QUEUE_FILE"
 
 echo "Starting queue runner..."
 
+source .venv/bin/activate
+
 while true; do
     if [ -s "$QUEUE_FILE" ]; then
-        cmd=$(head -n 1 "$QUEUE_FILE")
+        next_job=$(grep -n '^[[:space:]]*[^#[:space:]]' "$QUEUE_FILE" | head -n 1)
+
+        if [ -z "$next_job" ]; then
+            sleep 5
+            continue
+        fi
+
+        line_no=${next_job%%:*}
+        cmd=${next_job#*:}
 
         echo "====================================" | tee -a "$LOG_FILE"
         echo "Running: $cmd" | tee -a "$LOG_FILE"
@@ -28,9 +38,10 @@ while true; do
 
         if eval "$cmd" >> "$LOG_FILE" 2>&1; then
             echo "Finished successfully" | tee -a "$LOG_FILE"
-            sed -i '1d' "$QUEUE_FILE"
+            sed -i "${line_no}d" "$QUEUE_FILE"
         else
-            echo "Job failed. Keeping it in queue." | tee -a "$LOG_FILE"
+            echo "Job failed. Marking as skipped in queue." | tee -a "$LOG_FILE"
+            sed -i "${line_no}s|^|# SKIPPED $(date '+%Y-%m-%d %H:%M:%S') |" "$QUEUE_FILE"
             sleep 5
         fi
     else

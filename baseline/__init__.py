@@ -33,6 +33,11 @@ from baseline.manas_long_v0_2 import (
     ManasLongV02DataLoaderFactory,
     ManasLongV02Trainer,
 )
+from baseline.manas_long_v0_3 import (
+    ManasLongV03Config,
+    ManasLongV03DataLoaderFactory,
+    ManasLongV03Trainer,
+)
 from baseline.reve.reve_adapter import ReveDataLoaderFactory
 from baseline.reve.reve_config import ReveConfig
 from baseline.reve.reve_trainer import ReveTrainer
@@ -142,6 +147,13 @@ ModelRegistry.register_model(
     trainer_class=ManasLongV02Trainer
 )
 
+ModelRegistry.register_model(
+    model_type='manas-long-v0.3',
+    config_class=ManasLongV03Config,
+    adapter_class=ManasLongV03DataLoaderFactory,
+    trainer_class=ManasLongV03Trainer
+)
+
 __all__ = [
     "ModelRegistry",
     "CBraModConfig",
@@ -178,6 +190,9 @@ __all__ = [
     "ManasLongV02Config",
     "ManasLongV02DataLoaderFactory",
     "ManasLongV02Trainer",
+    "ManasLongV03Config",
+    "ManasLongV03DataLoaderFactory",
+    "ManasLongV03Trainer",
     "ReveConfig",
     "ReveDataLoaderFactory",
     "ReveTrainer",
