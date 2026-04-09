@@ -1,26 +1,43 @@
 seed: 42
 repetition: 1
-master_port: 51232
-multitask: true
-model_type: "manas-long-v0.3"
+master_port: 51271
+multitask: false
+model_type: "manas-long-v0.4"
 fs: 200
 
 data:
   batch_size: 32
-  num_workers: 2
+  num_workers: 8
   datasets:
-    hmc_90: finetune
-    hmc_60: finetune
-    hmc: finetune
-    adftd_30: finetune
-    adftd: finetune
-    siena_scalp: finetune
+    niah_hmc_90_v0: finetune
+  synthetic_tasks:
+    niah_hmc_90_v0:
+      kind: "niah_v0"
+      source_dataset: "hmc_90"
+      source_config: "finetune"
+      seed: 42
+      normalize_targets: true
+      target_names: ["center", "duration"]
+      amplitude_scale_range: [4.0, 8.0]
+      gaussian_weight: 0.7
+      lobe_weight: 0.3
+      channel_gain_jitter_std: 0.05
+      center_margin_sec: 0.0
+      allow_negative_polarity: true
+      gaussian:
+        duration_sec_range: [0.12, 0.35]
+        sigma_ratio_range: [0.08, 0.12]
+        noise_fraction_range: [0.02, 0.05]
+      lobe:
+        duration_sec_range: [0.35, 0.90]
+        second_half_scale_range: [0.65, 0.85]
+        noise_fraction_range: [0.02, 0.06]
 
 model:
-  pretrained_path: "/share/v0.3-mask-sched-disable-mae_epoch_24.pt"
+  pretrained_path: "/share/v0.4-mae_epoch_40.pt"
   patch_seconds: 1.0
   overlap_seconds: 0.1
-  embed_dim: 512
+  embed_dim: 1024
   encoder_depth: 22
   encoder_heads: 8
   decoder_depth: 5
@@ -42,6 +59,8 @@ model:
   pairwise_exclude_datasets: []
   n_spatial_coords: 3
   posenc_n_freqs: 4
+  attn_dropout: 0.0
+  use_flash_attention: true
   pool_from_mha_outputs: true
   num_local_aux_tokens: 9
   remove_bias_except_decoder_out: false
@@ -50,20 +69,24 @@ model:
   memory_active_scales_seconds: [5.0, 30.0]
   memory_attention_scales_seconds: [5.0, 30.0]
   memory_attention_use_null_token: false
-  memory_use_gru_tokens: false
   memory_encoder_access_start_layers:
     5.0: 7
-    30.0: 12
+    30.0: 16
   memory_decoder_access_start_layers:
-    5.0: 2
+    5.0: 3
     30.0: 1
   memory_conv_kernel_sizes:
     5.0: 400
     30.0: 800
   memory_patch_conv_channels: 64
   memory_token_dims:
-    5.0: 512
-    30.0: 512
+    5.0: 1024
+    30.0: 1024
+  memory_window_policy_enabled: true
+  memory_window_scale_thresholds_seconds:
+    5.0: 5.0
+    30.0: 30.0
+  memory_window_behavior_if_none_valid: "disable_memory"
   classifier_head:
     head_type: "attention_pool"
     hidden_dims: [128]
@@ -78,13 +101,13 @@ model:
     fusion_max_seq_len: 1024
 
 training:
-  max_epochs: 24
+  max_epochs: 20
   weight_decay: 0.05
   max_grad_norm: 1.0
   lr_schedule: "cosine"
   max_lr: 2.4e-4
-  min_lr: 2.0e-5
-  warmup_epochs: 3
+  min_lr: 2.4e-6
+  warmup_epochs: 5
   warmup_scale: 1e-1
   encoder_lr_scale: 0.1
   use_amp: true
@@ -102,15 +125,15 @@ training:
     lora_lr_scale: 1.0
 
 logging:
-  experiment_name: "manas_v0p3_mask_sched_disable_multitask_eval"
-  run_dir: "/share/arvasunewtemp/eval/manas_v0p3_mask_sched_disable_multitask_eval"
+  experiment_name: "manas_niah_v0_hmc_90"
+  run_dir: "/share/arvasunewtemp/eval/manas_niah_v0_hmc_90"
   use_cloud: true
   cloud_backend: "wandb"
   project: "manas"
   tags:
-    - "manas-long-v0.3"
-    - "v0.3-mask-sched-disable"
+    - "manas-long-v0.4"
+    - "niah-v0"
+    - "hmc-90"
     - "attention_pool"
-    - "multitask-eval"
   log_step_interval: 1
   ckpt_interval: 1

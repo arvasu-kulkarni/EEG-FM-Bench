@@ -1,6 +1,6 @@
 import logging
 import re
-from typing import Type, Optional
+from typing import Any, Type, Optional
 
 import torch
 import datasets
@@ -46,6 +46,8 @@ from data.dataset.tue.tusl import TuslBuilder
 from data.dataset.tue.tusz import TuszBuilder
 from data.dataset.workload import WorkloadBuilder
 from data.processor.builder import EEGDatasetBuilder, EEGConfig
+from data.synthetic.niah_v0 import NIAHV0TaskConfig, build_niah_v0_dataset, get_niah_v0_eval_info
+from data.synthetic.runtime import get_runtime_synthetic_dataset, is_runtime_synthetic_dataset
 
 
 log = logging.getLogger()
@@ -117,7 +119,45 @@ def resolve_dataset_request(dataset_name: str) -> tuple[str, Type[EEGDatasetBuil
         'wnd_div_sec': window_sec,
     }
 
+
+def _replace_montage_prefix(montage_key: str, new_prefix: str) -> str:
+    if '/' not in montage_key:
+        return new_prefix
+    _, suffix = montage_key.split('/', 1)
+    return f'{new_prefix}/{suffix}'
+
+
+def _get_builder(dataset_name: str, config_name: str, fs: Optional[int] = None) -> EEGDatasetBuilder:
+    _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
+    if fs is None:
+        return builder_cls(config_name=config_name, **config_overrides)
+    return builder_cls(config_name=config_name, fs=fs, **config_overrides)
+
+
+def _get_runtime_synthetic_cfg(dataset_name: str) -> Optional[NIAHV0TaskConfig]:
+    cfg = get_runtime_synthetic_dataset(dataset_name)
+    if cfg is None:
+        return None
+    kind = cfg.get('kind')
+    if kind != 'niah_v0':
+        raise ValueError(f"Unsupported runtime synthetic dataset kind for {dataset_name}: {kind!r}")
+    return NIAHV0TaskConfig.model_validate(cfg)
+
+
+def _load_single_eeg_dataset(
+        dataset_name: str,
+        builder_config: str,
+        split: datasets.NamedSplit,
+        fs: int,
+) -> Dataset:
+    builder = _get_builder(dataset_name, builder_config, fs=fs)
+    log.info(f'Loading {dataset_name}-{builder_config} at fs={fs}Hz from {builder.cache_dir}')
+    return builder.as_dataset(split=split)
+
 def get_dataset_patch_len(dataset_name: str, config_name: str) -> int:
+    synthetic_cfg = _get_runtime_synthetic_cfg(dataset_name)
+    if synthetic_cfg is not None:
+        return get_dataset_patch_len(synthetic_cfg.source_dataset, synthetic_cfg.source_config)
     _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
     builder = builder_cls(config_name=config_name, **config_overrides)
     return builder.config.wnd_div_sec
@@ -135,6 +175,18 @@ def get_dataset_shape_info(dataset_name: str, config_name: str, fs: int) -> dict
     Returns:
         Dict mapping montage_key -> (n_timepoints, n_channels)
     """
+    synthetic_cfg = _get_runtime_synthetic_cfg(dataset_name)
+    if synthetic_cfg is not None:
+        source_shapes = get_dataset_shape_info(
+            synthetic_cfg.source_dataset,
+            synthetic_cfg.source_config,
+            fs,
+        )
+        return {
+            _replace_montage_prefix(montage_key, dataset_name): shape
+            for montage_key, shape in source_shapes.items()
+        }
+
     resolved_name, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
     builder: EEGDatasetBuilder = builder_cls(config_name=config_name, **config_overrides)
 
@@ -152,25 +204,52 @@ def get_dataset_shape_info(dataset_name: str, config_name: str, fs: int) -> dict
 
 
 def get_dataset_n_class(dataset_name: str, config_name: str) -> int:
+    synthetic_cfg = _get_runtime_synthetic_cfg(dataset_name)
+    if synthetic_cfg is not None:
+        return int(get_niah_v0_eval_info(synthetic_cfg)['output_dim'])
     _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
     builder = builder_cls(config_name=config_name, **config_overrides)
+    if getattr(builder.config, 'output_dim', None) is not None:
+        return int(builder.config.output_dim)
     return len(builder.config.category)
 
 def get_dataset_category(dataset_name: str, config_name: str) -> list[str]:
+    synthetic_cfg = _get_runtime_synthetic_cfg(dataset_name)
+    if synthetic_cfg is not None:
+        return list(synthetic_cfg.target_names)
     _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
     builder = builder_cls(config_name=config_name, **config_overrides)
     return builder.config.category
 
-def get_dataset_eval_info(dataset_name: str, config_name: str) -> dict[str, bool | str]:
+def get_dataset_eval_info(dataset_name: str, config_name: str) -> dict[str, Any]:
+    synthetic_cfg = _get_runtime_synthetic_cfg(dataset_name)
+    if synthetic_cfg is not None:
+        return get_niah_v0_eval_info(synthetic_cfg)
     _, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
     builder = builder_cls(config_name=config_name, **config_overrides)
     return {
         'aggregate_by_subject': builder.config.eval_aggregate_by_subject,
         'subject_score_aggregation': builder.config.subject_score_aggregation,
+        'prediction_type': getattr(builder.config, 'prediction_type', 'classification'),
+        'output_dim': getattr(builder.config, 'output_dim', len(builder.config.category)),
+        'target_names': list(getattr(builder.config, 'target_names', builder.config.category)),
+        'selection_metric': getattr(builder.config, 'selection_metric', 'balanced_acc'),
+        'selection_metric_higher_is_better': getattr(builder.config, 'selection_metric_higher_is_better', True),
     }
 
 def get_dataset_montage(dataset_name: str, config_name: str) -> dict[str, list[str]]:
     # Note: This function needs builder instance to call standardize_chs_names()
+    synthetic_cfg = _get_runtime_synthetic_cfg(dataset_name)
+    if synthetic_cfg is not None:
+        source_montages = get_dataset_montage(
+            synthetic_cfg.source_dataset,
+            synthetic_cfg.source_config,
+        )
+        return {
+            _replace_montage_prefix(montage_key, dataset_name): channels
+            for montage_key, channels in source_montages.items()
+        }
+
     resolved_name, builder_cls, config_overrides = resolve_dataset_request(dataset_name)
     builder: EEGDatasetBuilder = builder_cls(config_name=config_name, **config_overrides)
     montage_names = builder.config.montage.keys()
@@ -209,19 +288,41 @@ def load_concat_eeg_datasets(
     if fs is None:
         raise ValueError('fs for dataset loader must be specified')
 
+    prediction_types_seen: set[str] = set()
+    output_dims_seen: set[int] = set()
+
     for ds_name, ds_config in zip(dataset_names, builder_configs):
         try:
-            _, builder_cls, config_overrides = resolve_dataset_request(ds_name)
-            builder = builder_cls(config_name=ds_config, fs=fs, **config_overrides)
-            log.info(f'Loading {ds_name}-{ds_config} at fs={fs}Hz from {builder.cache_dir}')
-            # noinspection PyTypeChecker
-            dataset: Dataset = builder.as_dataset(split=split)
+            synthetic_cfg = _get_runtime_synthetic_cfg(ds_name)
+            if synthetic_cfg is not None:
+                dataset = _load_single_eeg_dataset(
+                    synthetic_cfg.source_dataset,
+                    synthetic_cfg.source_config,
+                    split=split,
+                    fs=fs,
+                )
+                dataset = build_niah_v0_dataset(
+                    base_dataset=dataset,
+                    dataset_name=ds_name,
+                    config=synthetic_cfg,
+                    split=split,
+                    fs=fs,
+                )
+            else:
+                dataset = _load_single_eeg_dataset(ds_name, ds_config, split=split, fs=fs)
+
             if add_ds_name:
                 dataset = dataset.add_column('ds_name', [ds_name for _ in range(len(dataset))])
 
+            eval_info = get_dataset_eval_info(ds_name, ds_config)
+            prediction_type = str(eval_info.get('prediction_type', 'classification'))
+            output_dim = int(eval_info.get('output_dim', get_dataset_n_class(ds_name, ds_config)))
+            prediction_types_seen.add(prediction_type)
+            output_dims_seen.add(output_dim)
+
             if 'label' in dataset.column_names:
-                n_class = get_dataset_n_class(ds_name, ds_config)
-                if n_class > 1:
+                if prediction_type == 'classification':
+                    n_class = get_dataset_n_class(ds_name, ds_config)
                     label = torch.tensor(dataset['label'], dtype=torch.int32)
                     label_cnt = torch.bincount(label, minlength=n_class)
                     log.info(f'Sample distribution for {ds_name}-{ds_config} {split}: {label_cnt}')
@@ -231,9 +332,9 @@ def load_concat_eeg_datasets(
                     if cast_label:
                         dataset = dataset.cast_column('label', Value('int64'))
                 else:
-                    # Regression: do NOT cast label to int64; and use a dummy weight tensor for API consistency.
                     log.info(
-                        f'Sample distribution for {ds_name}-{ds_config} {split}: regression (n_class=1), skip bincount'
+                        f'Sample distribution for {ds_name}-{ds_config} {split}: '
+                        f'{prediction_type} (output_dim={output_dim}), skip bincount'
                     )
                     weight_list.append(torch.ones(1, dtype=torch.int64))
 
@@ -241,8 +342,16 @@ def load_concat_eeg_datasets(
         except KeyError:
             log.error(f'Dataset {ds_name} not found')
 
+    if len(prediction_types_seen) > 1:
+        raise ValueError(
+            f"Cannot concatenate datasets with mixed prediction types: {sorted(prediction_types_seen)}"
+        )
+    if prediction_types_seen == {'regression'} and len(output_dims_seen) > 1:
+        raise ValueError(
+            f"Cannot concatenate regression datasets with different output dims: {sorted(output_dims_seen)}"
+        )
+
     combined_dataset: Dataset = concatenate_datasets(dataset_list)
-    # combined_dataset = combined_dataset.flatten_indices()
     return combined_dataset.with_format('torch'), weight_list
 
 def calc_distribution_weight(n: int, label_cnt: Tensor, option: str):

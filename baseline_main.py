@@ -40,8 +40,16 @@ def main():
     conf_file_path = get_conf_file_path(cli_args.conf_file)
     file_cfg = OmegaConf.load(conf_file_path)
 
+    file_model_type = file_cfg.get('model_type')
+
     if model_type is None:
-        model_type = file_cfg.get('model_type')
+        model_type = file_model_type
+    elif file_model_type is not None and model_type != file_model_type:
+        raise ValueError(
+            "CLI model_type does not match config file model_type: "
+            f"cli={model_type!r}, file={file_model_type!r}, conf_file={conf_file_path}. "
+            "Remove the override or pass the matching model_type."
+        )
 
     # Validate model type
     available_models = ModelRegistry.list_models()

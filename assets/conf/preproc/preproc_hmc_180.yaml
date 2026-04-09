@@ -1,0 +1,6 @@
+fs: 200
+num_preproc_arrow_writers: 60
+num_preproc_mid_workers: 48
+pretrain_datasets: []
+finetune_datasets:
+  hmc_180: 'finetune'

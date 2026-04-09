@@ -1,0 +1,108 @@
+\documentclass[9pt]{article}
+
+\usepackage[margin=0.42in,landscape]{geometry}
+\usepackage{booktabs}
+\usepackage{caption}
+\usepackage{graphicx}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\tabcolsep}{3.5pt}
+\renewcommand{\arraystretch}{1.12}
+\captionsetup{font=small, labelformat=empty, skip=3pt}
+
+\newcommand{\best}[1]{\textbf{#1}}
+\newcommand{\na}{--}
+\newcommand{\tbltitle}[1]{\captionof{table}{\textbf{#1}}}
+
+\begin{document}
+\scriptsize
+\centering
+
+{\large Metrics by Dataset\par}
+\vspace{0.25em}
+{\small Rows are scale conditions; columns are train-method + head combinations. Bold marks the better value only when the absolute difference is at least 2 percentage points.\par}
+\vspace{0.7em}
+
+\noindent
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\tbltitle{BCIC-2A}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Condition & \shortstack{Attn\\Full FT} & \shortstack{Attn\\Linear} & \shortstack{Attn\\Partial} & \shortstack{Flat\\Full FT} & \shortstack{Flat\\Linear} & \shortstack{Flat\\Partial} \\
+\midrule
+scale-radius-control & 0.3811 & 0.2552 & 0.3186 & 0.5425 & 0.4957 & 0.4896 \\
+scale-radius10       & \best{0.4644} & 0.2552 & \best{0.4470} & \best{0.6181} & \best{0.5616} & \best{0.6085} \\
+\bottomrule
+\end{tabular}%
+}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\tbltitle{Motor Movement / Imagery}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Condition & \shortstack{Attn\\Full FT} & \shortstack{Attn\\Linear} & \shortstack{Attn\\Partial} & \shortstack{Flat\\Full FT} & \shortstack{Flat\\Linear} & \shortstack{Flat\\Partial} \\
+\midrule
+scale-radius-control & 0.5943 & \na & \na & 0.6298 & 0.5599 & 0.5975 \\
+scale-radius10       & 0.5838 & \na & \na & 0.6487 & 0.5541 & 0.6009 \\
+\bottomrule
+\end{tabular}%
+}
+\end{minipage}
+
+\vspace{0.6em}
+
+\noindent
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\tbltitle{Workload}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Condition & \shortstack{Attn\\Full FT} & \shortstack{Attn\\Linear} & \shortstack{Attn\\Partial} & \shortstack{Flat\\Full FT} & \shortstack{Flat\\Linear} & \shortstack{Flat\\Partial} \\
+\midrule
+scale-radius-control & 0.5925 & 0.5342 & \na & \best{0.6667} & 0.5958 & 0.5758 \\
+scale-radius10       & 0.5975 & \best{0.5583} & \na & 0.5942 & \best{0.6283} & \best{0.6450} \\
+\bottomrule
+\end{tabular}%
+}
+\end{minipage}
+\hfill
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\tbltitle{HMC}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Condition & \shortstack{Attn\\Full FT} & \shortstack{Attn\\Linear} & \shortstack{Attn\\Partial} & \shortstack{Flat\\Full FT} & \shortstack{Flat\\Linear} & \shortstack{Flat\\Partial} \\
+\midrule
+scale-radius-control & \na & 0.6364 & \na & \na & 0.639327538 & \na \\
+scale-radius10       & \na & 0.6278 & \na & \na & 0.652754298 & \na \\
+\bottomrule
+\end{tabular}%
+}
+\end{minipage}
+
+\vspace{0.6em}
+
+\begin{minipage}[t]{0.49\textwidth}
+\centering
+\tbltitle{Siena Scalp}
+\resizebox{\linewidth}{!}{%
+\begin{tabular}{@{}lcccccc@{}}
+\toprule
+Condition & \shortstack{Attn\\Full FT} & \shortstack{Attn\\Linear} & \shortstack{Attn\\Partial} & \shortstack{Flat\\Full FT} & \shortstack{Flat\\Linear} & \shortstack{Flat\\Partial} \\
+\midrule
+scale-radius-control & \na & \na & \na & \na & 0.6625 & \na \\
+scale-radius10       & \na & \na & \na & \na & \best{0.7124} & \na \\
+\bottomrule
+\end{tabular}%
+}
+\end{minipage}
+
+\end{document}

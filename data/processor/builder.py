@@ -8,7 +8,7 @@ import warnings
 from abc import ABC
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
-from typing import Optional, Union, Any
+from typing import Optional, Union, Any, Literal
 
 import mne
 import s3fs
@@ -105,6 +105,11 @@ class EEGConfig(BuilderConfig):
     category: list[str] = field(default_factory=lambda: [])
     eval_aggregate_by_subject: bool = False
     subject_score_aggregation: str = "mean_logits"
+    prediction_type: Literal["classification", "regression"] = "classification"
+    output_dim: Optional[int] = None
+    target_names: list[str] = field(default_factory=lambda: [])
+    selection_metric: Optional[str] = None
+    selection_metric_higher_is_better: Optional[bool] = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -120,6 +125,35 @@ class EEGConfig(BuilderConfig):
 
         self.raw_path = os.path.join(self.database_raw_root, self.suffix_path)
         self.category_query_dict: dict[str, int] = {name: idx for idx, name in enumerate(self.category)}
+
+        if self.output_dim is None:
+            if self.prediction_type == "classification":
+                self.output_dim = len(self.category)
+            else:
+                self.output_dim = len(self.target_names)
+
+        if self.prediction_type == "classification":
+            if self.is_finetune and self.output_dim <= 0 and len(self.category) > 0:
+                raise ValueError(
+                    f"{self.dataset_name}/{self.name}: classification output_dim must be > 0, got {self.output_dim}."
+                )
+            if self.selection_metric is None:
+                self.selection_metric = "balanced_acc"
+            if self.selection_metric_higher_is_better is None:
+                self.selection_metric_higher_is_better = True
+            if not self.target_names:
+                self.target_names = list(self.category)
+        else:
+            if self.output_dim is None or self.output_dim <= 0:
+                raise ValueError(
+                    f"{self.dataset_name}/{self.name}: regression output_dim must be > 0, got {self.output_dim}."
+                )
+            if self.selection_metric is None:
+                self.selection_metric = "rmse"
+            if self.selection_metric_higher_is_better is None:
+                self.selection_metric_higher_is_better = False
+            if not self.target_names:
+                self.target_names = [f"target_{idx}" for idx in range(int(self.output_dim))]
 
         if not self.is_finetune:
             self.test_ratio = 0.0
@@ -253,12 +287,14 @@ class EEGDatasetBuilder(datasets.GeneratorBasedBuilder, ABC):
         }
 
         if self.config.is_finetune:
-            # feat_dict.update({
-            #     "label": datasets.ClassLabel(num_classes=len(self.config.category), names=self.config.category),
-            # })
-            feat_dict.update({
-                "label": datasets.Value(dtype='int64')
-            })
+            if self.config.prediction_type == "classification":
+                feat_dict.update({
+                    "label": datasets.Value(dtype='int64')
+                })
+            else:
+                feat_dict.update({
+                    "label": datasets.Sequence(datasets.Value(dtype='float32'), length=int(self.config.output_dim))
+                })
 
         features = datasets.Features(feat_dict)
         return datasets.DatasetInfo(

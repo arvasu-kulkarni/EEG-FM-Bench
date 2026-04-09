@@ -88,7 +88,27 @@ class WorkloadBuilder(EEGDatasetBuilder):
 
     def __init__(self, config_name='pretrain',**kwargs):
         super().__init__(config_name, **kwargs)
+        self._resolve_raw_path_alias()
         self._load_meta_info()
+
+    def _resolve_raw_path_alias(self):
+        if os.path.exists(self.config.raw_path):
+            return
+
+        raw_root = self.config.database_raw_root
+        candidates = [
+            os.path.join(raw_root, 'Workload EEGMAT'),
+            os.path.join(raw_root, 'Workload'),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                logger.info(
+                    "Resolved workload raw_path alias from %s to %s",
+                    self.config.raw_path,
+                    candidate,
+                )
+                self.config.raw_path = candidate
+                return
 
     def _load_meta_info(self):
         try:

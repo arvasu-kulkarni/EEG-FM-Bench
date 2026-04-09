@@ -1,30 +1,27 @@
 seed: 42
 repetition: 1
 master_port: 51231
-multitask: true
+multitask: false
 model_type: "manas"
 fs: 200
 
 data:
   batch_size: 32
-  num_workers: 2
+  num_workers: 16
   datasets:
-    hmc_90: "finetune"
-    hmc_60: "finetune"
-    hmc: "finetune"
-    adftd_30: "finetune"
-    adftd: "finetune"
-    siena_scalp: "finetune"
+    bcic_2a: "finetune"
+    workload: "finetune"
+    motor_mv_img: "finetune"
 
 model:
-  pretrained_path: "/share/tmp/mishra/output/2026-03-22_11-03-19/mae_epoch_10.pt"
+  pretrained_path: "/share/arvasunewtemp/longcontrol/mae_epoch_10.pt"
   mae_type: "mahir"
   patch_seconds: 1.0
   overlap_seconds: 0.1
   embed_dim: 512
   encoder_depth: 22
   encoder_heads: 8
-  decoder_depth: 4
+  decoder_depth: 5
   decoder_heads: 8
   mask_ratio: 0.55
   aux_loss_weight: 0.1
@@ -81,15 +78,15 @@ training:
     lora_lr_scale: 1.0
 
 logging:
-  experiment_name: "manas_short_baseline_multitask_eval"
-  run_dir: "/share/arvasunewtemp/eval/manas_short_baseline_multitask_eval"
+  experiment_name: "manas_long_control_bcic_workload_motor"
+  run_dir: "/share/arvasunewtemp/eval/manas_long_control_bcic_workload_motor"
   use_cloud: true
   cloud_backend: "wandb"
   project: "manas"
   tags:
     - "manas-long"
-    - "short-baseline"
+    - "long-control"
     - "attention_pool"
-    - "multitask-eval"
+    - "bcic-workload-motor"
   log_step_interval: 1
   ckpt_interval: 1

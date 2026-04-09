@@ -4,7 +4,7 @@ MANAS-Long trainer for EEG-FM-Bench.
 
 import logging
 import os
-from typing import Literal, Optional
+from typing import Optional
 
 import torch
 from torch import nn
@@ -12,7 +12,7 @@ from torch import nn
 from baseline.abstract.classifier import MultiHeadClassifier
 from baseline.abstract.trainer import AbstractTrainer
 from baseline.manas_long.manas_long_adapter import ManasLongDataLoaderFactory
-from baseline.manas_long.manas_long_config import ManasLongConfig, ManasLongModelArgs
+from baseline.manas_long.manas_long_config import ManasLongConfig, ManasLongModelArgs, ManasLongTrainMethod
 from baseline.manas_long.model import ManasLongEncoder
 from baseline.utils.lora import freeze_non_lora_parameters, set_lora_trainable
 
@@ -59,7 +59,7 @@ class ManasLongTrainer(AbstractTrainer):
 
         self.encoder: Optional[ManasLongEncoder] = None
         self.classifier: Optional[MultiHeadClassifier] = None
-        self.loss_fn = nn.CrossEntropyLoss()
+        self.loss_fn = None
         self._last_effective_train_method: Optional[str] = None
 
     @staticmethod
@@ -112,6 +112,20 @@ class ManasLongTrainer(AbstractTrainer):
             t_sne=cfg.t_sne,
         )
         logger.info(f"Created multi-head classifier with heads: {list(head_configs.keys())}")
+
+        prediction_types = {
+            info['eval'].get('prediction_type', 'classification')
+            for info in self.ds_info.values()
+        }
+        if prediction_types == {'regression'}:
+            self.loss_fn = nn.MSELoss()
+            logger.info("MANAS-Long configured with MSE loss for regression targets")
+        elif prediction_types == {'classification'}:
+            self.loss_fn = nn.CrossEntropyLoss()
+        else:
+            raise ValueError(
+                f"MANAS-Long does not support mixing prediction types in one run: {sorted(prediction_types)}"
+            )
 
         if not cfg.pretrained_path:
             raise ValueError(
@@ -198,7 +212,23 @@ class ManasLongTrainer(AbstractTrainer):
                 "MANAS-Long checkpoint did not contain any encoder-side keys matching the downstream backbone."
             )
 
-        missing, unexpected = self.encoder.mae.load_state_dict(filtered, strict=True)
+        missing, unexpected = self.encoder.mae.load_state_dict(filtered, strict=False)
+
+        allowed_missing: set[str] = set()
+        if not getattr(self.encoder.mae, "use_memory_tokens", True):
+            allowed_missing = {
+                key
+                for key in missing
+                if ".memory_branch." in key or key == "decoder.pre_memory_norm.weight"
+            }
+            if allowed_missing:
+                logger.info(
+                    "Allowing missing MANAS-Long memory-specific keys because use_memory_tokens is disabled: "
+                    f"{sorted(allowed_missing)}"
+                )
+
+        missing = [key for key in missing if key not in allowed_missing]
+
         if missing:
             logger.error("MANAS-Long encoder missing keys after strict load:")
             for key in sorted(missing):
@@ -222,15 +252,90 @@ class ManasLongTrainer(AbstractTrainer):
             f"({len(filtered)}/{len(remapped)} checkpoint keys used)"
         )
 
-    def _effective_train_method(self) -> Literal["linear_probe", "partial_ft", "full_ft"]:
-        method: Literal["linear_probe", "partial_ft", "full_ft"] = self.cfg.training.train_method
+    @staticmethod
+    def _set_module_trainable(module: Optional[nn.Module], trainable: bool):
+        if module is None:
+            return
+        for param in module.parameters():
+            param.requires_grad = trainable
+
+    @staticmethod
+    def _set_parameter_trainable(param: Optional[nn.Parameter], trainable: bool):
+        if isinstance(param, nn.Parameter):
+            param.requires_grad = trainable
+
+    @staticmethod
+    def _get_encoder_layers(encoder: nn.Module) -> nn.ModuleList:
+        mae = getattr(encoder, "mae", None)
+        encoder_core = getattr(mae, "encoder", None) if mae is not None else None
+        layers = getattr(encoder_core, "layers", None)
+        if not isinstance(layers, nn.ModuleList):
+            raise AttributeError("MANAS-Long encoder does not expose encoder layers via encoder.mae.encoder.layers")
+        return layers
+
+    def _set_memory_trainability(
+        self,
+        encoder: nn.Module,
+        trainable: bool,
+        *,
+        include_decoder: bool,
+    ):
+        mae = getattr(encoder, "mae", None)
+        if mae is None:
+            return
+
+        encoder_core = getattr(mae, "encoder", None)
+        decoder_core = getattr(mae, "decoder", None) if include_decoder else None
+
+        self._set_module_trainable(getattr(encoder_core, "memory_branch", None), trainable)
+        self._set_module_trainable(getattr(encoder_core, "memory_branches", None), trainable)
+        self._set_parameter_trainable(getattr(encoder_core, "memory_scale_alpha", None), trainable)
+
+        self._set_module_trainable(getattr(mae, "memory_patch_embeds", None), trainable)
+        self._set_module_trainable(getattr(mae, "memory_token_modules", None), trainable)
+
+        if include_decoder:
+            self._set_module_trainable(getattr(decoder_core, "memory_branch", None), trainable)
+            self._set_module_trainable(getattr(decoder_core, "memory_branches", None), trainable)
+            self._set_module_trainable(getattr(decoder_core, "pre_memory_norm", None), trainable)
+            self._set_parameter_trainable(getattr(decoder_core, "memory_scale_alpha", None), trainable)
+
+    def _effective_train_method(self) -> ManasLongTrainMethod:
+        method: ManasLongTrainMethod = self.cfg.training.train_method
         if self.cfg.training.dual_stage:
             switch_epoch = self.cfg.training.max_epochs // 2
             if self.epoch < switch_epoch:
                 return "linear_probe"
         return method
 
-    def _set_encoder_trainability(self, method: Literal["linear_probe", "partial_ft", "full_ft"]):
+    def _set_partial_encoder_trainability(self, encoder: nn.Module):
+        layers = self._get_encoder_layers(encoder)
+        num_layers = len(layers)
+        enc_layer = self.cfg.training.enc_layer
+        freeze_direction = self.cfg.training.freeze
+        freeze_memory = self.cfg.training.freeze_memory
+
+        if enc_layer is None or freeze_direction is None:
+            raise ValueError("train_method='partial-enc' requires both training.enc_layer and training.freeze.")
+        if not 1 <= enc_layer <= num_layers:
+            raise ValueError(
+                f"training.enc_layer={enc_layer} is out of range for encoder depth {num_layers}. "
+                f"Expected a 1-based layer index between 1 and {num_layers}."
+            )
+
+        for param in encoder.parameters():
+            param.requires_grad = True
+
+        for layer_idx, layer in enumerate(layers, start=1):
+            freeze_layer = layer_idx > enc_layer if freeze_direction == "after" else layer_idx < enc_layer
+            if freeze_layer:
+                for param in layer.parameters():
+                    param.requires_grad = False
+
+        if freeze_memory:
+            self._set_memory_trainability(encoder, False, include_decoder=True)
+
+    def _set_encoder_trainability(self, method: ManasLongTrainMethod):
         if self.model is None:
             return
 
@@ -245,20 +350,23 @@ class ManasLongTrainer(AbstractTrainer):
 
         if method == "linear_probe":
             pass
+        elif method == "memory_probe":
+            self._set_memory_trainability(encoder, True, include_decoder=True)
         elif method == "partial_ft":
             for param in encoder.mae.encoder.layers[-1].parameters():
                 param.requires_grad = True
             for param in encoder.mae.encoder.final_norm.parameters():
                 param.requires_grad = True
-            for param in encoder.mae.encoder.memory_branches.parameters():
-                param.requires_grad = True
-            for param in encoder.mae.memory_patch_embeds.parameters():
-                param.requires_grad = True
-            for param in encoder.mae.memory_token_modules.parameters():
-                param.requires_grad = True
+            self._set_memory_trainability(encoder, True, include_decoder=False)
+        elif method == "partial-enc":
+            self._set_partial_encoder_trainability(encoder)
         elif method == "full_ft":
             for param in encoder.parameters():
                 param.requires_grad = True
+        elif method == "mem_freeze":
+            for param in encoder.parameters():
+                param.requires_grad = True
+            self._set_memory_trainability(encoder, False, include_decoder=True)
         else:
             raise ValueError(f"Unknown train_method: {method}")
 

@@ -38,3 +38,5 @@ plot/output/head_mlp/260226183222/bcic_2a/head_mlp/summary.json
 
 runs/
 scripts/
+.codex
+torchrun

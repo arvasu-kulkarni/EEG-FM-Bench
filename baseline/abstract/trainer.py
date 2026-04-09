@@ -27,6 +27,7 @@ from baseline.utils.lora import (
 )
 from baseline.utils.common import seed_torch
 from common.log import setup_log
+from data.synthetic.runtime import register_runtime_synthetic_datasets
 from data.processor.wrapper import (
     get_dataset_n_class,
     get_dataset_category,
@@ -56,6 +57,10 @@ METRIC_PRECISION_DICT = {
     "balanced_accuracy": "3f",
     "balanced_acc": "3f",
     "f1_weighted": "3f",
+    "mae": "4f",
+    "rmse": "4f",
+    "center_mae": "4f",
+    "duration_mae": "4f",
     "loss": "4f",
 }
 
@@ -110,6 +115,7 @@ class AbstractTrainer(ABC):
         # Dataset information
         self.ds_conf = cfg.data.datasets
         self.num_ds = len(self.ds_conf)
+        register_runtime_synthetic_datasets(getattr(cfg.data, "synthetic_tasks", {}))
 
         self.ds_info = {}
         self.montage_info = {}
@@ -161,23 +167,34 @@ class AbstractTrainer(ABC):
             if not eval_metrics or not test_metrics:
                 continue
 
-            current_balanced_acc = eval_metrics.get('balanced_acc')
-            if current_balanced_acc is None:
+            eval_info = self.ds_info[ds_name]['eval']
+            selection_metric = eval_info.get('selection_metric', 'balanced_acc')
+            higher_is_better = bool(eval_info.get('selection_metric_higher_is_better', True))
+
+            current_metric = eval_metrics.get(selection_metric)
+            if current_metric is None:
                 logger.warning(
-                    f"Validation balanced_acc missing for dataset {ds_name}; "
+                    f"Validation {selection_metric} missing for dataset {ds_name}; "
                     "falling back to last-epoch metrics for repetition summary."
                 )
                 continue
 
             best_eval_metrics = self.best_epoch_metrics.get('eval', {}).get(ds_name)
-            best_balanced_acc = None if best_eval_metrics is None else best_eval_metrics.get('balanced_acc')
+            best_metric = None if best_eval_metrics is None else best_eval_metrics.get(selection_metric)
 
-            if best_balanced_acc is None or current_balanced_acc > best_balanced_acc:
+            is_better = best_metric is None
+            if not is_better:
+                if higher_is_better:
+                    is_better = current_metric > best_metric
+                else:
+                    is_better = current_metric < best_metric
+
+            if is_better:
                 self.best_epoch_metrics['eval'][ds_name] = deepcopy(eval_metrics)
                 self.best_epoch_metrics['test'][ds_name] = deepcopy(test_metrics)
                 logger.info(
                     f"{ds_name}: updated best checkpoint selection to epoch {int(eval_metrics['epoch'])} "
-                    f"(val balanced_acc={current_balanced_acc:.4f})"
+                    f"(val {selection_metric}={current_metric:.4f})"
                 )
 
     def _resolve_num_repetitions(self) -> int:
@@ -549,6 +566,8 @@ class AbstractTrainer(ABC):
 
         # Add raw confusion matrix data for cloud logging backends
         for ds_name in ds_metric.keys():
+            if self.ds_info[ds_name]['eval'].get('prediction_type', 'classification') != 'classification':
+                continue
             matrix_tensor = ds_metric[ds_name].get('cm_metric', ds_metric[ds_name]['cm'])
             matrix = matrix_tensor.cpu().numpy()
             labels = self.ds_info[ds_name]['category']
@@ -642,27 +661,41 @@ class AbstractTrainer(ABC):
             prefix: str,
             loss: float,
     ) -> Dict[str, float]:
-        label_np = labels.numpy()
-        pred_np = torch.argmax(logits, dim=-1).numpy()
-
-        n_class = self.ds_info[ds_name]['n_class']
-
         metrics = {
             f'{ds_name}/{prefix}/epoch': self.epoch,
             f'{ds_name}/{prefix}/loss': loss,
         }
 
-        # Basic accuracy
-        # noinspection PyUnresolvedReferences
+        eval_info = self.ds_info[ds_name]['eval']
+        prediction_type = eval_info.get('prediction_type', 'classification')
+
+        if prediction_type == 'regression':
+            pred = logits.detach().float().cpu()
+            target = labels.detach().float().cpu()
+            abs_err = torch.abs(pred - target)
+            sq_err = (pred - target) ** 2
+
+            metrics[f'{ds_name}/{prefix}/mae'] = float(abs_err.mean().item())
+            metrics[f'{ds_name}/{prefix}/rmse'] = float(torch.sqrt(sq_err.mean()).item())
+
+            target_names = list(eval_info.get('target_names') or self.ds_info[ds_name].get('category') or [])
+            for idx in range(pred.shape[-1]):
+                target_name = target_names[idx] if idx < len(target_names) else f"target_{idx}"
+                metrics[f'{ds_name}/{prefix}/{target_name}_mae'] = float(abs_err[:, idx].mean().item())
+
+            return metrics
+
+        label_np = labels.numpy()
+        pred_np = torch.argmax(logits, dim=-1).numpy()
+        n_class = self.ds_info[ds_name]['n_class']
+
         accuracy = (pred_np == label_np).mean()
         metrics[f'{ds_name}/{prefix}/acc'] = float(accuracy)
 
-        # Balanced accuracy
         balanced_acc = balanced_accuracy_score(label_np, pred_np)
         metrics[f'{ds_name}/{prefix}/balanced_acc'] = float(balanced_acc)
 
         if n_class == 2:
-            # Binary classification metrics
             probs = torch.softmax(logits, dim=1)[:, 1].numpy()
 
             try:
@@ -679,7 +712,6 @@ class AbstractTrainer(ABC):
                 logger.warning(f'Error calculating AUC-PR for {ds_name} {prefix}: {e}')
                 metrics[f'{ds_name}/{prefix}/auc_pr'] = 0.0
         else:
-            # Multi-class classification metrics
             cohen_kappa = cohen_kappa_score(label_np, pred_np)
             metrics[f'{ds_name}/{prefix}/cohen_kappa'] = float(cohen_kappa)
 
@@ -1379,6 +1411,7 @@ class AbstractTrainer(ABC):
             batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
             labels = batch['label']
             ds_name = batch['montage'][0].split('/')[0]
+            prediction_type = self.ds_info[ds_name]['eval'].get('prediction_type', 'classification')
 
             # Forward pass with mixed precision
             logits, loss = self.train_step(batch, labels)
@@ -1397,24 +1430,27 @@ class AbstractTrainer(ABC):
 
             # Logging with distributed reduction
             if self.current_step % self.cfg.logging.log_step_interval == 0:
-                # Calculate step accuracy
-                preds = torch.argmax(logits, dim=-1)
-                step_acc = (preds == labels).float().mean()
-
-                # Create tensors for distributed reduction
                 loss_tensor = loss.clone().detach()
-                acc_tensor = step_acc.clone().detach()
+                metric_tensor = None
+                metric_key = 'train/acc'
+
+                if prediction_type == 'regression':
+                    metric_tensor = torch.abs(logits.detach().float() - labels.detach().float()).mean()
+                    metric_key = 'train/mae'
+                else:
+                    preds = torch.argmax(logits, dim=-1)
+                    metric_tensor = (preds == labels).float().mean()
 
                 if is_dist:
                     torch.distributed.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.AVG)
-                    torch.distributed.all_reduce(acc_tensor, op=torch.distributed.ReduceOp.AVG)
+                    torch.distributed.all_reduce(metric_tensor, op=torch.distributed.ReduceOp.AVG)
 
                 if get_is_master():
                     log_data = {
                         'train/epoch': self.epoch,
                         'train/step': self.current_step,
                         'train/loss_ce': loss_tensor.cpu().item(),
-                        'train/acc': acc_tensor.cpu().item(),
+                        metric_key: metric_tensor.cpu().item(),
                         'train/grad_norm': grad_norm,
                         'train/header_lr': self.get_current_lr()[0],
                     }
@@ -1451,15 +1487,18 @@ class AbstractTrainer(ABC):
 
         overall_metrics = {}
         for ds_name in self.ds_info.keys():
-            n_class = self.ds_info[ds_name]['n_class']
-            overall_metrics[ds_name] = {
+            prediction_type = self.ds_info[ds_name]['eval'].get('prediction_type', 'classification')
+            ds_metrics = {
                 'loss_sum': torch.zeros([1], dtype=torch.float64, device=self.device),
-                'cm': torch.zeros((n_class, n_class), dtype=torch.int64, device=self.device),
                 'cnt': torch.zeros(1, dtype=torch.int64, device=self.device),
                 'logits': [],
                 'labels': [],
                 'subjects': [],
             }
+            if prediction_type == 'classification':
+                n_class = self.ds_info[ds_name]['n_class']
+                ds_metrics['cm'] = torch.zeros((n_class, n_class), dtype=torch.int64, device=self.device)
+            overall_metrics[ds_name] = ds_metrics
 
         with torch.no_grad():
             for dataloader in dataloaders:
@@ -1467,19 +1506,20 @@ class AbstractTrainer(ABC):
                     batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
                     labels = batch['label']
                     ds_name = batch['montage'][0].split('/')[0]
-                    n_class = self.ds_info[ds_name]['n_class']
+                    prediction_type = self.ds_info[ds_name]['eval'].get('prediction_type', 'classification')
 
                     # Forward pass with mixed precision
                     logits, loss = self.train_step(batch, labels)
 
                     logits = logits.float()
-                    pred = torch.argmax(logits, dim=1).detach()
-                    cm = self._calc_confusion_matrix(pred, labels.detach(), n_class)
-
                     batch_size = labels.shape[0]
                     overall_metrics[ds_name]['loss_sum'] += loss.detach() * batch_size
                     overall_metrics[ds_name]['cnt'] += batch_size
-                    overall_metrics[ds_name]['cm'] += cm.detach()
+                    if prediction_type == 'classification':
+                        n_class = self.ds_info[ds_name]['n_class']
+                        pred = torch.argmax(logits, dim=1).detach()
+                        cm = self._calc_confusion_matrix(pred, labels.detach(), n_class)
+                        overall_metrics[ds_name]['cm'] += cm.detach()
 
                     logits_across, labels_across, subjects_across = self._gather_result(
                         logits.detach(),
@@ -1500,7 +1540,8 @@ class AbstractTrainer(ABC):
                 if is_dist:
                     torch.distributed.all_reduce(overall_metrics[ds_name]['loss_sum'], op=torch.distributed.ReduceOp.SUM)
                     torch.distributed.all_reduce(overall_metrics[ds_name]['cnt'], op=torch.distributed.ReduceOp.SUM)
-                    torch.distributed.all_reduce(overall_metrics[ds_name]['cm'], op=torch.distributed.ReduceOp.SUM)
+                    if 'cm' in overall_metrics[ds_name]:
+                        torch.distributed.all_reduce(overall_metrics[ds_name]['cm'], op=torch.distributed.ReduceOp.SUM)
 
                 overall_metrics[ds_name]['loss'] = overall_metrics[ds_name]['loss_sum'] / overall_metrics[ds_name][
                     'cnt'].float()
@@ -1519,12 +1560,13 @@ class AbstractTrainer(ABC):
                             ds_name=ds_name,
                         )
 
-                    pred_metric = torch.argmax(logits_metric, dim=1)
-                    overall_metrics[ds_name]['cm_metric'] = self._calc_confusion_matrix(
-                        pred_metric,
-                        labels_metric,
-                        self.ds_info[ds_name]['n_class'],
-                    ).cpu()
+                    if self.ds_info[ds_name]['eval'].get('prediction_type', 'classification') == 'classification':
+                        pred_metric = torch.argmax(logits_metric, dim=1)
+                        overall_metrics[ds_name]['cm_metric'] = self._calc_confusion_matrix(
+                            pred_metric,
+                            labels_metric,
+                            self.ds_info[ds_name]['n_class'],
+                        ).cpu()
                     loss_metric = overall_metrics[ds_name]['loss'].detach().cpu().item()
                     metrics = self._calculate_metrics_for_dataset(
                         labels=labels_metric,

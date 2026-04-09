@@ -4,7 +4,7 @@ MANAS-Long configuration for EEG-FM-Bench.
 
 from typing import Dict, List, Literal, Optional
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from baseline.abstract.config import AbstractConfig, BaseDataArgs, BaseModelArgs
 from baseline.manas.manas_config import ManasTrainingArgs, ManasLoggingArgs
@@ -65,8 +65,32 @@ class ManasLongModelArgs(BaseModelArgs):
     memory_teacher_loss_type: Literal["smooth_l1", "mse"] = "smooth_l1"
 
 
+ManasLongTrainMethod = Literal[
+    "linear_probe",
+    "partial_ft",
+    "full_ft",
+    "mem_freeze",
+    "memory_probe",
+    "partial-enc",
+]
+
+
 class ManasLongTrainingArgs(ManasTrainingArgs):
-    train_method: Literal["linear_probe", "partial_ft", "full_ft"] = "linear_probe"
+    train_method: ManasLongTrainMethod = "linear_probe"
+    enc_layer: Optional[int] = None
+    freeze: Optional[Literal["after", "before"]] = None
+    freeze_memory: bool = False
+
+    @model_validator(mode="after")
+    def validate_partial_enc_args(self):
+        if self.enc_layer is not None and self.enc_layer <= 0:
+            raise ValueError("training.enc_layer must be >= 1 when provided.")
+        if self.train_method == "partial-enc":
+            if self.enc_layer is None:
+                raise ValueError("training.enc_layer is required when train_method='partial-enc'.")
+            if self.freeze is None:
+                raise ValueError("training.freeze is required when train_method='partial-enc'.")
+        return self
 
 
 class ManasLongLoggingArgs(ManasLoggingArgs):

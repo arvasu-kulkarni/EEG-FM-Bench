@@ -1,26 +1,28 @@
 seed: 42
 repetition: 1
-master_port: 51232
-multitask: true
+master_port: 51234
+multitask: false
 model_type: "manas-long-v0.3"
 fs: 200
 
 data:
   batch_size: 32
-  num_workers: 2
+  num_workers: 16
   datasets:
-    hmc_90: finetune
-    hmc_60: finetune
-    hmc: finetune
-    adftd_30: finetune
-    adftd: finetune
     siena_scalp: finetune
+    hmc_60: finetune
+    hmc_90: finetune
+    hmc: finetune
+    adftd: finetune
+    adftd_30: finetune
 
 model:
-  pretrained_path: "/share/v0.3-mask-sched-disable-mae_epoch_24.pt"
+  # Derived from the provided train run save_dir + epoch count.
+  # Update this if you moved or renamed the final checkpoint artifact.
+  pretrained_path: "/share/v0.3_1024-gru-mae_epoch_24.pt"
   patch_seconds: 1.0
   overlap_seconds: 0.1
-  embed_dim: 512
+  embed_dim: 1024
   encoder_depth: 22
   encoder_heads: 8
   decoder_depth: 5
@@ -42,15 +44,17 @@ model:
   pairwise_exclude_datasets: []
   n_spatial_coords: 3
   posenc_n_freqs: 4
+  attn_dropout: 0.0
+  use_flash_attention: true
   pool_from_mha_outputs: true
-  num_local_aux_tokens: 9
   remove_bias_except_decoder_out: false
   use_memory_tokens: true
   memory_scales_seconds: [5.0, 30.0]
   memory_active_scales_seconds: [5.0, 30.0]
   memory_attention_scales_seconds: [5.0, 30.0]
   memory_attention_use_null_token: false
-  memory_use_gru_tokens: false
+  memory_use_gru_tokens: true
+  num_local_aux_tokens: 9
   memory_encoder_access_start_layers:
     5.0: 7
     30.0: 12
@@ -102,15 +106,16 @@ training:
     lora_lr_scale: 1.0
 
 logging:
-  experiment_name: "manas_v0p3_mask_sched_disable_multitask_eval"
-  run_dir: "/share/arvasunewtemp/eval/manas_v0p3_mask_sched_disable_multitask_eval"
+  experiment_name: "manas_v0p3_mask_sched_disable_1024_gru"
+  run_dir: "/share/arvasunewtemp/eval/manas_v0p3_mask_sched_disable_1024_gru"
   use_cloud: true
   cloud_backend: "wandb"
   project: "manas"
   tags:
     - "manas-long-v0.3"
     - "v0.3-mask-sched-disable"
+    - "embed-1024"
+    - "memory-gru"
     - "attention_pool"
-    - "multitask-eval"
   log_step_interval: 1
   ckpt_interval: 1

@@ -7,6 +7,8 @@ from enum import Enum
 from typing import Dict, Optional, List
 from pydantic import BaseModel, Field
 
+from data.synthetic.niah_v0 import NIAHV0TaskConfig
+
 
 class ClassifierHeadType(str, Enum):
     """Enumeration of supported classification head types."""
@@ -45,6 +47,7 @@ class BaseDataArgs(BaseModel):
     datasets: Dict[str, str] = Field(default_factory=lambda: {})
     batch_size: int = 32
     num_workers: int = 2
+    synthetic_tasks: Dict[str, NIAHV0TaskConfig] = Field(default_factory=lambda: {})
 
 
 class BaseModelArgs(BaseModel):

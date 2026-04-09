@@ -57,7 +57,7 @@ class ManasTrainer(AbstractTrainer):
 
         self.encoder: Optional[ManasEncoder] = None
         self.classifier: Optional[MultiHeadClassifier] = None
-        self.loss_fn = nn.CrossEntropyLoss()
+        self.loss_fn = None
         self._last_effective_train_method: Optional[str] = None
 
     @staticmethod
@@ -110,6 +110,20 @@ class ManasTrainer(AbstractTrainer):
             t_sne=cfg.t_sne,
         )
         logger.info(f"Created multi-head classifier with heads: {list(head_configs.keys())}")
+
+        prediction_types = {
+            info['eval'].get('prediction_type', 'classification')
+            for info in self.ds_info.values()
+        }
+        if prediction_types == {'regression'}:
+            self.loss_fn = nn.MSELoss()
+            logger.info("MANAS configured with MSE loss for regression targets")
+        elif prediction_types == {'classification'}:
+            self.loss_fn = nn.CrossEntropyLoss()
+        else:
+            raise ValueError(
+                f"MANAS does not support mixing prediction types in one run: {sorted(prediction_types)}"
+            )
 
         if not cfg.pretrained_path:
             raise ValueError(
